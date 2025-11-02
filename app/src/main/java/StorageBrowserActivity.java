@@ -39,6 +39,11 @@ import androidx.recyclerview.widget.GridLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 
 import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.io.Serializable;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
@@ -465,7 +470,7 @@ public class StorageBrowserActivity extends Activity implements StorageBrowserAd
                             new GatherFilesForHidingTask().execute(folder);
                             break;
 						case 5: // Move to Recycle Bin
-							new MoveToRecycleTask().execute(folder);
+							moveToRecycleBin(folderList);
 							break;
 						case 6: // Delete Permanently
 							initiateFolderDeletionProcess(folder);
@@ -677,7 +682,7 @@ public class StorageBrowserActivity extends Activity implements StorageBrowserAd
     }
 
     private void moveToRecycleBin(List<File> filesToMove) {
-        new MoveToRecycleTask().execute(filesToMove.toArray(new File[0]));
+        new MoveToRecycleTask(filesToMove).execute();
     }
 
     private void performDeletion(List<String> filePathsToDelete) {
@@ -1173,18 +1178,42 @@ public class StorageBrowserActivity extends Activity implements StorageBrowserAd
         }
     }
 
-    private class MoveToRecycleTask extends AsyncTask<File, Void, Integer> {
+    private class MoveToRecycleTask extends AsyncTask<Void, String, List<File>> {
+        private AlertDialog progressDialog;
+        private List<File> filesToMove;
+        private Context context;
+
+        public MoveToRecycleTask(List<File> filesToMove) {
+            this.filesToMove = filesToMove;
+            this.context = StorageBrowserActivity.this;
+        }
+
         @Override
-        protected Integer doInBackground(File... filesToMove) {
+        protected void onPreExecute() {
+            AlertDialog.Builder builder = new AlertDialog.Builder(context);
+            View dialogView = LayoutInflater.from(context).inflate(R.layout.dialog_progress_simple, null);
+            TextView progressText = dialogView.findViewById(R.id.progress_text);
+            progressText.setText("Moving files to Recycle Bin...");
+            builder.setView(dialogView);
+            builder.setCancelable(false);
+            progressDialog = builder.create();
+            progressDialog.show();
+        }
+
+        @Override
+        protected List<File> doInBackground(Void... voids) {
             File recycleBinDir = new File(Environment.getExternalStorageDirectory(), "HFMRecycleBin");
             if (!recycleBinDir.exists()) {
                 if (!recycleBinDir.mkdir()) {
-                    return -1;
+                    return new ArrayList<>();
                 }
             }
 
-            int movedCount = 0;
-            for (File sourceFile : filesToMove) {
+            List<File> movedFiles = new ArrayList<>();
+            for (int i = 0; i < filesToMove.size(); i++) {
+                File sourceFile = filesToMove.get(i);
+                publishProgress("Moving: " + sourceFile.getName());
+
                 if (sourceFile.exists()) {
                     File destFile = new File(recycleBinDir, sourceFile.getName());
                     if (destFile.exists()) {
@@ -1197,8 +1226,29 @@ public class StorageBrowserActivity extends Activity implements StorageBrowserAd
                         }
                         destFile = new File(recycleBinDir, name + "_" + System.currentTimeMillis() + extension);
                     }
-                    if (sourceFile.renameTo(destFile)) {
-                        movedCount++;
+
+                    boolean moveSuccess = false;
+                    boolean isSourceOnSd = StorageUtils.isFileOnSdCard(context, sourceFile);
+
+                    if (isSourceOnSd) {
+                        // Cross-volume: copy then delete
+                        if (copyFile(sourceFile, destFile)) {
+                            if (StorageUtils.deleteFile(context, sourceFile)) {
+                                moveSuccess = true;
+                            } else {
+                                // Cleanup failed copy
+                                destFile.delete();
+                            }
+                        }
+                    } else {
+                        // Same-volume: rename
+                        if (sourceFile.renameTo(destFile)) {
+                            moveSuccess = true;
+                        }
+                    }
+
+                    if (moveSuccess) {
+                        movedFiles.add(sourceFile);
                         scanFile(sourceFile);
                         scanFile(destFile);
                     } else {
@@ -1206,24 +1256,65 @@ public class StorageBrowserActivity extends Activity implements StorageBrowserAd
                     }
                 }
             }
-            return movedCount;
+            return movedFiles;
         }
 
         @Override
-        protected void onPostExecute(Integer movedCount) {
-            if (movedCount == -1) {
-                Toast.makeText(StorageBrowserActivity.this, "Failed to create Recycle Bin folder.", Toast.LENGTH_SHORT).show();
+        protected void onPostExecute(List<File> movedFiles) {
+            progressDialog.dismiss();
+            if (movedFiles.isEmpty() && !filesToMove.isEmpty()) {
+                Toast.makeText(context, "Failed to move files.", Toast.LENGTH_SHORT).show();
             } else {
-                Toast.makeText(StorageBrowserActivity.this, movedCount + " item(s) moved to Recycle Bin.", Toast.LENGTH_LONG).show();
+                Toast.makeText(context, movedFiles.size() + " item(s) moved to Recycle Bin.", Toast.LENGTH_LONG).show();
             }
-            refreshCurrentDirectory();
+
+            // Instant UI refresh
+            if (!movedFiles.isEmpty()) {
+                List<Object> itemsToRemove = new ArrayList<>();
+                for (Object item : masterList) {
+                    if (item instanceof StorageBrowserAdapter.FileItem) {
+                        if (movedFiles.contains(((StorageBrowserAdapter.FileItem) item).getFile())) {
+                            itemsToRemove.add(item);
+                        }
+                    }
+                }
+                masterList.removeAll(itemsToRemove);
+                // This is a simplified refresh, a more complex one could remove empty date headers
+                adapter.updateMasterList(masterList);
+            }
+        }
+
+        private boolean copyFile(File source, File destination) {
+            InputStream in = null;
+            OutputStream out = null;
+            try {
+                in = new FileInputStream(source); // This might fail for SD card without SAF
+                out = new FileOutputStream(destination);
+                byte[] buf = new byte[8192];
+                int len;
+                while ((len = in.read(buf)) > 0) {
+                    out.write(buf, 0, len);
+                }
+                return true;
+            } catch (IOException e) {
+                Log.e(TAG, "File copy failed", e);
+                // Attempt with SAF
+                return StorageUtils.copyFile(context, source, destination);
+            } finally {
+                try {
+                    if (in != null) in.close();
+                    if (out != null) out.close();
+                } catch (IOException e) {
+                    e.printStackTrace();
+                }
+            }
         }
 
         private void scanFile(File file) {
             Intent mediaScanIntent = new Intent(Intent.ACTION_MEDIA_SCANNER_SCAN_FILE);
             Uri contentUri = Uri.fromFile(file);
             mediaScanIntent.setData(contentUri);
-            sendBroadcast(mediaScanIntent);
+            context.sendBroadcast(mediaScanIntent);
         }
     }
 }
