@@ -266,6 +266,13 @@
             android:label="HFM Messenger Drop"
             android:theme="@style/AppTheme.Light"
             android:exported="false"/>
+            
+        <!-- THIS IS THE FIX: Declare the new DropProgressActivity -->
+        <activity
+            android:name=".DropProgressActivity"
+            android:label="HFM Drop Progress"
+            android:theme="@style/AppTheme.Light"
+            android:exported="false"/>
 
 
         <provider
