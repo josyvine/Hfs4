@@ -19,6 +19,7 @@ import org.libtorrent4j.alerts.AlertType;
 import org.libtorrent4j.alerts.StateUpdateAlert;
 import org.libtorrent4j.alerts.TorrentErrorAlert;
 import org.libtorrent4j.alerts.TorrentFinishedAlert;
+import org.libtorrent4j.swig.byte_vector;
 import org.libtorrent4j.swig.create_torrent;
 import org.libtorrent4j.swig.file_storage;
 import org.libtorrent4j.swig.libtorrent;
@@ -324,7 +325,12 @@ public class TorrentManager {
             // bencoded often returns a SWIG byte_vector; convert with Vectors helper if present
             try {
                 // Try Vectors.byte_vector2bytes
-                torrentBytes = Vectors.byte_vector2bytes(bencoded);
+                // FIXED: Cast the `bencoded` Object to the expected `byte_vector` type.
+                // REASON: The `Vectors.byte_vector2bytes` method expects a `byte_vector` input.
+                // Your reflective `callMethodIfExists` returns a generic `Object`, so the compiler
+                // needs this explicit cast to know the type is correct. This resolves the
+                // "incompatible types" error.
+                torrentBytes = Vectors.byte_vector2bytes((byte_vector) bencoded);
             } catch (Throwable t) {
                 // Fallback: if bencoded is byte[] already
                 if (bencoded instanceof byte[]) {
@@ -459,7 +465,11 @@ public class TorrentManager {
             Method m2 = findMethod(sessionManager.getClass(), "download", new Class[]{String.class, File.class, Object.class});
             if (m2 != null) {
                 // try calling with null flags
-                Object r = m2.invoke(sessionManager, ti.makeMagnetUri(), saveDir, null);
+                // FIXED: Replaced `ti.makeMagnetUri()` with the static method call `TorrentInfo.makeMagnetUri(ti)`.
+                // REASON: The `makeMagnetUri()` method is no longer an instance method on the TorrentInfo object
+                // in the new library version. It is now a static helper method in the TorrentInfo class.
+                // This resolves the "cannot find symbol: method makeMagnetUri()" error.
+                Object r = m2.invoke(sessionManager, TorrentInfo.makeMagnetUri(ti), saveDir, null);
                 if (r instanceof TorrentHandle) return (TorrentHandle) r;
             }
         } catch (Throwable ignored) {
@@ -670,20 +680,10 @@ public class TorrentManager {
         }
     }
 
-    private void callMethodIfExists(Object target, String name, Class[] pts, Object[] args) {
-        try {
-            callMethodIfExists(target, name, pts, args);
-        } catch (Throwable ignored) {
-        }
-    }
-
-    private Object callStaticMethodIfExists(Class<?> cls, String name, Class[] pts, Object[] args) {
-        try {
-            return callStaticMethodIfExists(cls, name, pts, args);
-        } catch (Throwable t) {
-            return null;
-        }
-    }
+    // FIXED: Removed the duplicate methods that were causing "method ... is already defined" errors.
+    // REASON: Your original file had duplicate definitions for these two wrapper methods.
+    // Removing them resolves the compilation error while leaving the functional versions intact.
+    // The previous duplicate methods were located here.
 
     private String infoHashObjectToHexSafe(Object ihObj) {
         if (ihObj == null) return null;
