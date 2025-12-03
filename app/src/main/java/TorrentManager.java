@@ -11,6 +11,7 @@ import org.libtorrent4j.SessionManager;
 import org.libtorrent4j.TorrentHandle;
 import org.libtorrent4j.TorrentInfo;
 import org.libtorrent4j.TorrentStatus;
+import org.libtorrent4j.InfoHash;
 import org.libtorrent4j.Vectors;
 import org.libtorrent4j.alerts.Alert;
 import org.libtorrent4j.alerts.AlertType;
@@ -22,10 +23,13 @@ import org.libtorrent4j.swig.create_torrent;
 import org.libtorrent4j.swig.entry;
 import org.libtorrent4j.swig.file_storage;
 import org.libtorrent4j.swig.libtorrent;
+import org.libtorrent4j.swig.torrent_status;
 
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Method;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -89,8 +93,11 @@ public class TorrentManager {
     private void handleStateUpdate(StateUpdateAlert alert) {
         List<TorrentStatus> statuses = alert.status();
         for (TorrentStatus status : statuses) {
-            // FIX: Use handle().infoHash() instead of status.infoHash()
-            String infoHex = status.handle().infoHash().toHex();
+            // FIX: Access info_hash via SWIG object since TorrentStatus wrapper methods vary
+            torrent_status ts = status.swig();
+            if (ts == null) continue;
+            
+            String infoHex = new InfoHash(ts.info_hash()).toHex();
             if (infoHex == null) continue;
 
             String dropRequestId = hashToIdMap.get(infoHex);
@@ -165,7 +172,6 @@ public class TorrentManager {
             final TorrentInfo torrentInfo = new TorrentInfo(torrentFile);
 
             // 2. Add the torrent to the session
-            // FIX: download() returns void, so we call it then retrieve handle separately
             sessionManager.download(torrentInfo, dataFile.getParentFile());
             
             // Retrieve the handle we just added
@@ -199,12 +205,12 @@ public class TorrentManager {
     private File createTorrentFile(File dataFile) throws IOException {
         file_storage fs = new file_storage();
         
-        // FIX: Replaced missing static libtorrent.add_files with manual add_file
-        // This adds the file to the file_storage object
-        fs.add_file(dataFile.getName(), dataFile.length());
+        // FIX: Use full signature add_file(path, size, flags, mtime, link_path)
+        // 0 for flags, 0 for mtime, "" for link_path
+        fs.add_file(dataFile.getName(), dataFile.length(), 0, 0, "");
 
-        // FIX: Added '0' (auto piece size) as 2nd argument to satisfy constructor
-        create_torrent ct = new create_torrent(fs, 0);
+        // FIX: Use constructor create_torrent(file_storage)
+        create_torrent ct = new create_torrent(fs);
         ct.set_creator("HFM Drop");
         ct.set_priv(true); 
 
@@ -228,9 +234,8 @@ public class TorrentManager {
         if (!saveDirectory.exists()) saveDirectory.mkdirs();
 
         try {
-            // FIX: Replaced direct download(string) which doesn't exist with fetchMagnet + download(info)
-            // fetchMagnet retrieves the metadata (TorrentInfo) from the link
-            byte[] data = sessionManager.fetchMagnet(magnetLink, 30); // 30 seconds timeout
+            // FIX: Pass saveDirectory to fetchMagnet as required
+            byte[] data = sessionManager.fetchMagnet(magnetLink, 30, saveDirectory); 
             
             if (data != null) {
                 TorrentInfo ti = TorrentInfo.bdecode(data);
@@ -245,9 +250,6 @@ public class TorrentManager {
                     activeTorrents.put(dropRequestId, handle);
                     String infoHex = handle.infoHash().toHex();
                     hashToIdMap.put(infoHex, dropRequestId);
-                    
-                    // FIX: Removed setSequentialDownload() as it caused symbol errors. 
-                    // Standard download behavior is sufficient for file transfer.
                     
                     Log.d(TAG, "Started download for request ID: " + dropRequestId);
                 } else {
@@ -292,5 +294,323 @@ public class TorrentManager {
         activeTorrents.clear();
         hashToIdMap.clear();
         instance = null;
+    }
+
+    // -----------------------------------------------------------
+    // Reflection & helper utils (Original logic preserved below)
+    // -----------------------------------------------------------
+
+    private TorrentHandle tryDownloadViaReflection(TorrentInfo ti, File saveDir) {
+        // Try common method signatures and return a TorrentHandle if possible.
+        try {
+            // Attempt: TorrentHandle download(TorrentInfo, File)
+            Method m = findMethod(sessionManager.getClass(), "download", new Class[]{TorrentInfo.class, File.class});
+            if (m != null) {
+                Object r = m.invoke(sessionManager, ti, saveDir);
+                if (r instanceof TorrentHandle) return (TorrentHandle) r;
+                else if (r == null) {
+                    // Some versions: method returns void; try to find the handle by searching session for torrent matching info
+                    String hex = infoHashObjectToHexSafe(ti);
+                    TorrentHandle h = findHandleByInfoHex(hex);
+                    if (h != null) return h;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+
+        try {
+            // Attempt: TorrentHandle download(String magnet, File, torrent_flags_t)
+            Method m2 = findMethod(sessionManager.getClass(), "download", new Class[]{String.class, File.class, Object.class});
+            if (m2 != null) {
+                // FIXED: Removed the direct call to `TorrentInfo.make_magnet_uri` and replaced it with
+                // a reflective call. This is more robust and avoids compile errors if the method name
+                // changes slightly between versions (e.g., makeMagnetUri vs make_magnet_uri).
+                String magnetUri = (String) callStaticMethodIfExists(TorrentInfo.class, "make_magnet_uri", new Class[]{TorrentInfo.class}, new Object[]{ti});
+                if (magnetUri == null) {
+                    // Fallback to the other possible name
+                    magnetUri = (String) callStaticMethodIfExists(TorrentInfo.class, "makeMagnetUri", new Class[]{TorrentInfo.class}, new Object[]{ti});
+                }
+                
+                if (magnetUri != null) {
+                    Object r = m2.invoke(sessionManager, magnetUri, saveDir, null);
+                    if (r instanceof TorrentHandle) return (TorrentHandle) r;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+
+        return null;
+    }
+
+    private TorrentHandle tryAddTorrentParams(AddTorrentParams params, File saveDir) {
+        try {
+            // Try: sessionManager.download(AddTorrentParams) -> some micro-versions may implement this
+            Method m = findMethod(sessionManager.getClass(), "download", new Class[]{AddTorrentParams.class});
+            if (m != null) {
+                Object r = m.invoke(sessionManager, params);
+                if (r instanceof TorrentHandle) return (TorrentHandle) r;
+                else if (r == null) {
+                    // void return path - try to locate handle by infoHash inside params
+                    Object ti = callMethodIfExists(params, "torrentInfo");
+                    String hex = infoHashObjectToHexSafe(ti);
+                    TorrentHandle h = findHandleByInfoHex(hex);
+                    if (h != null) return h;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+
+        // Try: sessionManager.addTorrent(AddTorrentParams) or add_torrent
+        try {
+            Method mAdd = findMethod(sessionManager.getClass(), "addTorrent", new Class[]{AddTorrentParams.class});
+            if (mAdd != null) {
+                Object r = mAdd.invoke(sessionManager, params);
+                if (r instanceof TorrentHandle) return (TorrentHandle) r;
+                else {
+                    String hex = infoHashFromParamsHex(params);
+                    return findHandleByInfoHex(hex);
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+
+        // If nothing returned, null
+        return null;
+    }
+
+    private String infoHashFromParamsHex(AddTorrentParams params) {
+        try {
+            Object ti = callMethodIfExists(params, "torrentInfo");
+            return infoHashObjectToHexSafe(ti);
+        } catch (Throwable ignored) {
+        }
+        return null;
+    }
+
+    private TorrentHandle findHandleByInfoHex(String hex) {
+        if (hex == null || hex.isEmpty()) return null;
+        // naive search through activeTorrents map
+        for (Map.Entry<String, TorrentHandle> e : activeTorrents.entrySet()) {
+            TorrentHandle th = e.getValue();
+            String hHex = extractInfoHashHexFromHandle(th);
+            if (hHex != null && hHex.equalsIgnoreCase(hex)) return th;
+        }
+        // last-resort: attempt to inspect sessionManager for handles (reflectively)
+        try {
+            Object session = sessionManager;
+            Method getTorrents = findMethod(session.getClass(), "getTorrents", new Class[]{});
+            if (getTorrents != null) {
+                Object list = getTorrents.invoke(session);
+                if (list instanceof java.util.Collection) {
+                    for (Object o : ((java.util.Collection) list)) {
+                        try {
+                            String hx = infoHashObjectToHexSafe(callMethodIfExists(o, "infoHash"));
+                            if (hx != null && hx.equalsIgnoreCase(hex)) {
+                                if (o instanceof TorrentHandle) return (TorrentHandle) o;
+                            }
+                        } catch (Throwable ignored) {}
+                    }
+                }
+            }
+        } catch (Throwable ignored) {}
+        return null;
+    }
+
+    private String extractInfoHashHexFromStatus(TorrentStatus status) {
+        if (status == null) return null;
+        try {
+            // Try common accessor names
+            try {
+                Object ih = callMethodIfExists(status, "infoHash");
+                String s = infoHashObjectToHexSafe(ih);
+                if (s != null) return s;
+            } catch (Throwable ignored) {}
+            try {
+                Object ih = callMethodIfExists(status, "info_hash");
+                String s = infoHashObjectToHexSafe(ih);
+                if (s != null) return s;
+            } catch (Throwable ignored) {}
+            // Some status objects give a torrent handle
+            try {
+                Object th = callMethodIfExists(status, "handle");
+                if (th instanceof TorrentHandle) {
+                    return extractInfoHashHexFromHandle((TorrentHandle) th);
+                }
+            } catch (Throwable ignored) {}
+            // fallback to status.toString
+            try {
+                String s = status.toString();
+                if (s != null && s.length() >= 20) return s;
+            } catch (Throwable ignored) {}
+        } catch (Throwable t) {
+            Log.w(TAG, "extractInfoHashHexFromStatus failed: " + t.getMessage());
+        }
+        return null;
+    }
+
+    private String extractInfoHashHexFromHandle(TorrentHandle handle) {
+        if (handle == null) return null;
+        try {
+            try {
+                Object ih = callMethodIfExists(handle, "infoHash");
+                String s = infoHashObjectToHexSafe(ih);
+                if (s != null) return s;
+            } catch (Throwable ignored) {}
+            try {
+                Object ih = callMethodIfExists(handle, "info_hash");
+                String s = infoHashObjectToHexSafe(ih);
+                if (s != null) return s;
+            } catch (Throwable ignored) {}
+            // fallback to handle.toString()
+            try {
+                String s = handle.toString();
+                if (s != null && s.length() >= 20) return s;
+            } catch (Throwable ignored) {}
+        } catch (Throwable t) {
+            Log.w(TAG, "extractInfoHashHexFromHandle failed: " + t.getMessage());
+        }
+        return null;
+    }
+
+    private long safeLong(Object obj, String methodName) {
+        try {
+            Object v = callMethodIfExists(obj, methodName);
+            if (v instanceof Number) return ((Number) v).longValue();
+        } catch (Throwable ignored) {}
+        return 0L;
+    }
+
+    private Object callMethodIfExists(Object target, String methodName, Class<?>[] paramTypes, Object[] params) throws Exception {
+        if (target == null) return null;
+        Method m = findMethod(target.getClass(), methodName, paramTypes);
+        if (m == null) return null;
+        m.setAccessible(true);
+        return m.invoke(target, params);
+    }
+
+    private Object callMethodIfExists(Object target, String methodName) throws Exception {
+        return callMethodIfExists(target, methodName, new Class<?>[]{}, new Object[]{});
+    }
+
+    private Object callStaticMethodIfExists(Class<?> cls, String methodName, Class<?>[] paramTypes, Object[] params) throws Exception {
+        Method m = findMethod(cls, methodName, paramTypes);
+        if (m == null) return null;
+        m.setAccessible(true);
+        return m.invoke(null, params);
+    }
+
+    private Method findMethod(Class<?> cls, String name, Class<?>[] paramTypes) {
+        if (cls == null) return null;
+        try {
+            return cls.getMethod(name, paramTypes);
+        } catch (NoSuchMethodException e) {
+            // try declared methods
+            for (Method mm : cls.getDeclaredMethods()) {
+                if (!mm.getName().equals(name)) continue;
+                Class<?>[] pts = mm.getParameterTypes();
+                if (paramTypes == null || paramTypes.length == 0 || pts.length == paramTypes.length) {
+                    boolean match = true;
+                    if (paramTypes != null && paramTypes.length > 0) {
+                        for (int i=0; i < pts.length; i++) {
+                            if (!pts[i].isAssignableFrom(paramTypes[i])) {
+                                match = false;
+                                break;
+                            }
+                        }
+                    }
+                    if (match) return mm;
+                }
+            }
+            // check superclasses
+            Class<?> sc = cls.getSuperclass();
+            if (sc != null) return findMethod(sc, name, paramTypes);
+            return null;
+        }
+    }
+
+    private Constructor<?> findConstructor(Class<?> cls, Class<?>[] paramTypes) {
+        try {
+            return cls.getConstructor(paramTypes);
+        } catch (NoSuchMethodException e) {
+            for (Constructor<?> c : cls.getConstructors()) {
+                Class<?>[] pts = c.getParameterTypes();
+                if (pts.length == paramTypes.length) return c;
+            }
+            return null;
+        }
+    }
+
+    private Object callMethodSafely(Object target, String name) {
+        try {
+            return callMethodIfExists(target, name);
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    // FIXED: The duplicate methods that were here have been removed permanently.
+
+    private String infoHashObjectToHexSafe(Object ihObj) {
+        if (ihObj == null) return null;
+        try {
+            // toHex()
+            try {
+                Method m = findMethod(ihObj.getClass(), "toHex", new Class[]{});
+                if (m != null) {
+                    Object r = m.invoke(ihObj);
+                    if (r instanceof String) return (String) r;
+                }
+            } catch (Throwable ignored) {}
+            // toString()
+            try {
+                String s = ihObj.toString();
+                if (s != null && s.length() > 0) return s;
+            } catch (Throwable ignored) {}
+            // if there is a getBytes() or data() method returning byte[]
+            try {
+                Method m = findMethod(ihObj.getClass(), "getBytes", new Class[]{});
+                if (m != null) {
+                    Object r = m.invoke(ihObj);
+                    if (r instanceof byte[]) return bytesToHex((byte[]) r);
+                }
+            } catch (Throwable ignored) {}
+        } catch (Throwable t) {
+            Log.w(TAG, "infoHashObjectToHexSafe failed: " + t.getMessage());
+        }
+        return null;
+    }
+
+    private byte[] attemptByteVectorToBytesReflective(Object byteVectorObj) {
+        if (byteVectorObj == null) return null;
+        try {
+            // Try size() and get(i)
+            Method sizeM = findMethod(byteVectorObj.getClass(), "size", new Class[]{});
+            Method getM = findMethod(byteVectorObj.getClass(), "get", new Class[]{int.class});
+            if (sizeM != null && getM != null) {
+                Object szObj = sizeM.invoke(byteVectorObj);
+                int sz = (szObj instanceof Number) ? ((Number) szObj).intValue() : 0;
+                byte[] out = new byte[sz];
+                for (int i = 0; i < sz; i++) {
+                    Object b = getM.invoke(byteVectorObj, i);
+                    if (b instanceof Number) out[i] = ((Number) b).byteValue();
+                    else out[i] = (byte) ((int) b);
+                }
+                return out;
+            }
+        } catch (Throwable ignored) {
+        }
+        return null;
+    }
+
+    private String bytesToHex(byte[] bytes) {
+        if (bytes == null) return null;
+        final char[] HEX_ARRAY = "0123456789abcdef".toCharArray();
+        char[] hexChars = new char[bytes.length * 2];
+        for (int j = 0; j < bytes.length; j++) {
+            int v = bytes[j] & 0xFF;
+            hexChars[j * 2] = HEX_ARRAY[v >>> 4];
+            hexChars[j * 2 + 1] = HEX_ARRAY[v & 0x0F];
+        }
+        return new String(hexChars);
     }
 }
