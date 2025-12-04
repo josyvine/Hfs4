@@ -33,8 +33,8 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * TorrentManager using Brute-Force Reflection.
- * Now iterates all constructors to find a match for create_torrent.
+ * TorrentManager with Brute-Force Reflection + Full Reflection for params.
+ * Fixes compile errors (AddTorrentParams) and runtime errors (constructor not found).
  */
 public class TorrentManager {
 
@@ -164,16 +164,23 @@ public class TorrentManager {
 
             TorrentHandle handle = tryDownloadViaReflection(torrentInfo, dataFile.getParentFile());
 
+            // If direct download returned null, try fallback via AddTorrentParams (Reflective)
             if (handle == null) {
-                AddTorrentParams params = new AddTorrentParams();
+                Object params = null;
                 try {
+                    // Fully reflective instantiation to avoid "cannot find symbol"
+                    Class<?> atpClass = Class.forName("org.libtorrent4j.AddTorrentParams");
+                    params = atpClass.newInstance();
+                    
                     callMethodIfExists(params, "setTorrentInfo", new Class[]{TorrentInfo.class}, new Object[]{torrentInfo});
-                } catch (Throwable t) { }
-                try {
                     callMethodIfExists(params, "setSavePath", new Class[]{String.class}, new Object[]{dataFile.getParentFile().getAbsolutePath()});
-                } catch (Throwable t) { }
+                } catch (Throwable t) {
+                    broadcastError("Reflection Init Params Error: " + t.toString());
+                }
 
-                handle = tryAddTorrentParams(params, dataFile.getParentFile());
+                if (params != null) {
+                    handle = tryAddTorrentParams(params, dataFile.getParentFile());
+                }
             }
 
             if (handle != null && handle.isValid()) {
@@ -233,29 +240,29 @@ public class TorrentManager {
         create_torrent ct = null;
         String constructorError = "No constructor error yet";
 
-        // --- NEW: BRUTE FORCE CONSTRUCTOR FINDER ---
+        // BRUTE FORCE CONSTRUCTOR FINDER
         try {
             Constructor<?>[] constructors = create_torrent.class.getConstructors();
             for (Constructor<?> cons : constructors) {
                 Class<?>[] params = cons.getParameterTypes();
                 
-                // Case 1: Constructor takes only (file_storage)
+                // Case 1: (file_storage)
                 if (params.length == 1 && params[0].isAssignableFrom(file_storage.class)) {
                     ct = (create_torrent) cons.newInstance(fs);
                     break;
                 }
                 
-                // Case 2: Constructor takes (file_storage, int piece_size)
+                // Case 2: (file_storage, int)
                 if (params.length == 2 && params[0].isAssignableFrom(file_storage.class) && (params[1] == int.class || params[1] == Integer.class)) {
-                    ct = (create_torrent) cons.newInstance(fs, 0); // 0 = auto piece size
+                    ct = (create_torrent) cons.newInstance(fs, 0); 
                     break;
                 }
 
-                // Case 3: Constructor takes (file_storage, int piece_size, int flags) - Common in v2.x
+                // Case 3: (file_storage, int, int)
                 if (params.length == 3 && params[0].isAssignableFrom(file_storage.class) 
                     && (params[1] == int.class || params[1] == Integer.class)
                     && (params[2] == int.class || params[2] == Integer.class)) {
-                    ct = (create_torrent) cons.newInstance(fs, 0, 0); // 0 flags
+                    ct = (create_torrent) cons.newInstance(fs, 0, 0); 
                     break;
                 }
             }
@@ -326,7 +333,7 @@ public class TorrentManager {
                 Class<?> atpClass = Class.forName("org.libtorrent4j.AddTorrentParams");
                 Object params = callStaticMethodIfExists(atpClass, "parseMagnetUri", new Class[]{String.class}, new Object[]{magnetLink});
                 if (params != null) {
-                     TorrentHandle handle = tryAddTorrentParamsViaReflection(params, saveDirectory);
+                     TorrentHandle handle = tryAddTorrentParams(params, saveDirectory);
                      if (handle != null && handle.isValid()) {
                         activeTorrents.put(dropRequestId, handle);
                         String infoHex = extractInfoHashHexFromHandle(handle);
@@ -394,10 +401,13 @@ public class TorrentManager {
         try {
             Method m2 = findMethod(sessionManager.getClass(), "download", new Class[]{String.class, File.class, Object.class});
             if (m2 != null) {
-                String magnetUri = (String) callStaticMethodIfExists(TorrentInfo.class, "make_magnet_uri", new Class[]{TorrentInfo.class}, new Object[]{ti});
-                if (magnetUri == null) {
-                    magnetUri = (String) callStaticMethodIfExists(TorrentInfo.class, "makeMagnetUri", new Class[]{TorrentInfo.class}, new Object[]{ti});
+                String magnetUri = makeMagnetUriSafe(null); // Fallback string gen
+                // Actually invoke magnet uri logic if possible
+                Object ih = callMethodIfExists(ti, "infoHash");
+                if (ih != null) {
+                    magnetUri = "magnet:?xt=urn:btih:" + infoHashToHexSafe(ih);
                 }
+                
                 if (magnetUri != null) {
                     Object r = m2.invoke(sessionManager, magnetUri, saveDir, null);
                     if (r instanceof TorrentHandle) return (TorrentHandle) r;
@@ -407,9 +417,10 @@ public class TorrentManager {
         return null;
     }
 
-    private TorrentHandle tryAddTorrentParams(AddTorrentParams params, File saveDir) {
+    // Helper using Object to avoid import errors
+    private TorrentHandle tryAddTorrentParams(Object params, File saveDir) {
         try {
-            Method m = findMethod(sessionManager.getClass(), "download", new Class[]{AddTorrentParams.class});
+            Method m = findMethod(sessionManager.getClass(), "download", new Class[]{params.getClass()});
             if (m != null) {
                 Object r = m.invoke(sessionManager, params);
                 if (r instanceof TorrentHandle) return (TorrentHandle) r;
@@ -420,10 +431,11 @@ public class TorrentManager {
                     if (h != null) return h;
                 }
             }
-        } catch (Throwable ignored) { }
+        } catch (Throwable ignored) {
+        }
 
         try {
-            Method mAdd = findMethod(sessionManager.getClass(), "addTorrent", new Class[]{AddTorrentParams.class});
+            Method mAdd = findMethod(sessionManager.getClass(), "addTorrent", new Class[]{params.getClass()});
             if (mAdd != null) {
                 Object r = mAdd.invoke(sessionManager, params);
                 if (r instanceof TorrentHandle) return (TorrentHandle) r;
@@ -432,15 +444,17 @@ public class TorrentManager {
                     return findHandleByInfoHex(hex);
                 }
             }
-        } catch (Throwable ignored) { }
+        } catch (Throwable ignored) {
+        }
         return null;
     }
 
-    private String infoHashFromParamsHex(AddTorrentParams params) {
+    private String infoHashFromParamsHex(Object params) {
         try {
             Object ti = callMethodIfExists(params, "torrentInfo");
             return infoHashObjectToHexSafe(ti);
-        } catch (Throwable ignored) { }
+        } catch (Throwable ignored) {
+        }
         return null;
     }
 
@@ -573,6 +587,20 @@ public class TorrentManager {
         return infoHashObjectToHexSafe(ih);
     }
 
+    // MISSING METHOD RESTORED
+    private String makeMagnetUriSafe(TorrentHandle handle) {
+        if (handle == null) return null;
+        try {
+            // Try standard method
+            return handle.makeMagnetUri();
+        } catch (Throwable t) {
+            // Fallback: construct manually if possible
+            String hex = extractInfoHashHexFromHandle(handle);
+            if (hex != null) return "magnet:?xt=urn:btih:" + hex;
+        }
+        return null;
+    }
+
     private byte[] attemptByteVectorToBytesReflective(Object byteVectorObj) {
         if (byteVectorObj == null) return null;
         try {
@@ -600,16 +628,5 @@ public class TorrentManager {
             hexChars[j * 2 + 1] = HEX_ARRAY[v & 0x0F];
         }
         return new String(hexChars);
-    }
-    
-    private TorrentHandle tryAddTorrentParamsViaReflection(Object params, File saveDir) {
-        try {
-            callMethodIfExists(params, "setSavePath", new Class[]{String.class}, new Object[]{saveDir.getAbsolutePath()});
-            Method m = findMethod(SessionManager.class, "download", new Class[]{params.getClass()});
-            if (m != null) {
-                return (TorrentHandle) m.invoke(sessionManager, params);
-            }
-        } catch (Throwable ignored) { }
-        return null;
     }
 }
