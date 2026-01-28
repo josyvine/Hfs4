@@ -73,7 +73,7 @@ import java.util.concurrent.Executors;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-public class SearchActivity extends Activity implements SearchAdapter.OnItemClickListener, SearchAdapter.OnHeaderCheckedChangeListener {
+public class SearchActivity extends Activity implements SearchAdapter.OnItemClickListener, SearchAdapter.OnHeaderCheckedChangeListener, SearchAdapter.OnHeaderClickListener {
 
     private static final String TAG = "SearchActivity";
 
@@ -82,7 +82,11 @@ public class SearchActivity extends Activity implements SearchAdapter.OnItemClic
     private RecyclerView searchResultsGrid;
     private SearchAdapter adapter;
     private GridLayoutManager gridLayoutManager;
+    
+    // CHANGED: Separate master list (all data) from display list (what user sees)
+    private List<Object> masterList = new ArrayList<>();
     private List<Object> displayList = new ArrayList<>();
+    
     private String currentFilterType = "all";
     private ScaleGestureDetector scaleGestureDetector;
     private int currentSpanCount = 3;
@@ -112,10 +116,12 @@ public class SearchActivity extends Activity implements SearchAdapter.OnItemClic
     public static class DateHeader {
         private final String dateString;
         private boolean isChecked;
+        private boolean isExpanded; // NEW: Track expansion state
 
         public DateHeader(String dateString) {
             this.dateString = dateString;
             this.isChecked = false;
+            this.isExpanded = true; // Default to expanded
         }
 
         public String getDateString() {
@@ -128,6 +134,14 @@ public class SearchActivity extends Activity implements SearchAdapter.OnItemClic
 
         public void setChecked(boolean checked) {
             isChecked = checked;
+        }
+        
+        public boolean isExpanded() {
+            return isExpanded;
+        }
+
+        public void setExpanded(boolean expanded) {
+            isExpanded = expanded;
         }
     }
 
@@ -229,7 +243,8 @@ public class SearchActivity extends Activity implements SearchAdapter.OnItemClic
 			});
 
         searchResultsGrid.setLayoutManager(gridLayoutManager);
-        adapter = new SearchAdapter(this, displayList, this, this);
+        // CHANGED: Pass 'this' as OnHeaderClickListener as well
+        adapter = new SearchAdapter(this, displayList, this, this, this);
         searchResultsGrid.setAdapter(adapter);
     }
 
@@ -272,14 +287,35 @@ public class SearchActivity extends Activity implements SearchAdapter.OnItemClic
         runOnUiThread(new Runnable() {
 				@Override
 				public void run() {
-					displayList.clear();
-					displayList.addAll(groupedList);
-					adapter.updateData(displayList);
+					masterList.clear();
+					masterList.addAll(groupedList);
+                    // Initially show everything (all headers expanded by default)
+                    rebuildDisplayList();
 					if (results.isEmpty()) {
 						Toast.makeText(SearchActivity.this, "No files found.", Toast.LENGTH_SHORT).show();
 					}
 				}
 			});
+    }
+    
+    // NEW: Logic to rebuild the display list based on expanded/collapsed headers
+    private void rebuildDisplayList() {
+        displayList.clear();
+        boolean isCurrentGroupExpanded = true;
+        
+        for (Object item : masterList) {
+            if (item instanceof DateHeader) {
+                DateHeader header = (DateHeader) item;
+                displayList.add(header);
+                isCurrentGroupExpanded = header.isExpanded();
+            } else {
+                // If it's a file item, only add it if the current group is expanded
+                if (isCurrentGroupExpanded) {
+                    displayList.add(item);
+                }
+            }
+        }
+        adapter.updateData(displayList);
     }
 
     private List<Object> processAndGroupResults(List<SearchResult> flatResults) {
@@ -389,6 +425,8 @@ public class SearchActivity extends Activity implements SearchAdapter.OnItemClic
         File externalStorage = Environment.getExternalStorageDirectory();
 
         List<File> rootsToScan = new ArrayList<>();
+        
+        // --- ADDED: Standard Primary Storage paths ---
         rootsToScan.add(new File(externalStorage, "WhatsApp"));
         rootsToScan.add(new File(externalStorage, "Android/media/com.whatsapp/WhatsApp"));
         rootsToScan.add(new File(externalStorage, "Download"));
@@ -396,6 +434,23 @@ public class SearchActivity extends Activity implements SearchAdapter.OnItemClic
         rootsToScan.add(new File(externalStorage, "DCIM"));
         rootsToScan.add(new File(externalStorage, "Pictures"));
         rootsToScan.add(new File(externalStorage, "DCIM/Camera"));
+        
+        // --- NEW: CLONED APP SUPPORT (Dual Messenger / Parallel Space) ---
+        // Scan for user 999 (common for dual apps)
+        File dualAppStorage = new File("/storage/emulated/999");
+        if (dualAppStorage.exists() && dualAppStorage.canRead()) {
+             rootsToScan.add(new File(dualAppStorage, "WhatsApp"));
+             rootsToScan.add(new File(dualAppStorage, "Android/media/com.whatsapp/WhatsApp"));
+             rootsToScan.add(new File(dualAppStorage, "DCIM"));
+             rootsToScan.add(new File(dualAppStorage, "Download"));
+        }
+        
+        // Scan for user 10 (sometimes used)
+        File parallelAppStorage = new File("/storage/emulated/10");
+        if (parallelAppStorage.exists() && parallelAppStorage.canRead()) {
+             rootsToScan.add(new File(parallelAppStorage, "WhatsApp"));
+             rootsToScan.add(new File(parallelAppStorage, "DCIM"));
+        }
 
         for (File root : rootsToScan) {
             if (root.exists() && root.isDirectory()) {
@@ -418,6 +473,7 @@ public class SearchActivity extends Activity implements SearchAdapter.OnItemClic
 
         for (File file : files) {
             if (file.isDirectory()) {
+                // If specific folder searched, only go deeper if it matches
                 if (params.folderPath == null || file.getAbsolutePath().toLowerCase().contains(params.folderPath.toLowerCase())) {
                     scanDirectory(file, params, results);
                 }
@@ -725,7 +781,8 @@ public class SearchActivity extends Activity implements SearchAdapter.OnItemClic
 
     private void initiateDeletionProcess() {
         final List<SearchResult> selectedResults = new ArrayList<>();
-        for (Object item : displayList) {
+        // CHANGED: Use masterList here to ensure we delete hidden items if they were selected previously
+        for (Object item : masterList) {
             if (item instanceof SearchResult) {
                 SearchResult result = (SearchResult) item;
                 if (!result.isExcluded()) {
@@ -845,7 +902,8 @@ public class SearchActivity extends Activity implements SearchAdapter.OnItemClic
             File parentDir = originalFile.getParentFile();
 
             if (parentDir != null && parentDir.isDirectory()) {
-                for (Object item : displayList) {
+                // Use master list for sibling check
+                for (Object item : masterList) {
                     if (item instanceof SearchResult) {
                         SearchResult potentialSibling = (SearchResult) item;
                         if (potentialSibling.getPath() != null) {
@@ -942,8 +1000,12 @@ public class SearchActivity extends Activity implements SearchAdapter.OnItemClic
 					else if (itemId == R.id.filter_archives) currentFilterType = "archives";
 					else if (itemId == R.id.filter_other) currentFilterType = "other";
 					
+                    // Clear both lists and refresh data
+                    masterList.clear();
                     displayList.clear();
-                    adapter.notifyDataSetChanged();
+                    adapter.updateData(displayList);
+                    
+					executeQuery(searchInput.getText().toString());
 					return true;
 				}
 			});
@@ -954,7 +1016,11 @@ public class SearchActivity extends Activity implements SearchAdapter.OnItemClic
     public void onItemClick(SearchResult item) {
         item.setExcluded(!item.isExcluded());
         updateHeaderStateForItem(item);
-        adapter.notifyDataSetChanged();
+        // Find index in displayList to notify adapter
+        int index = displayList.indexOf(item);
+        if(index != -1) {
+            adapter.notifyItemChanged(index);
+        }
     }
 
     @Override
@@ -985,37 +1051,52 @@ public class SearchActivity extends Activity implements SearchAdapter.OnItemClic
     @Override
     public void onHeaderCheckedChanged(DateHeader header, boolean isChecked) {
         header.setChecked(isChecked);
-        int headerIndex = displayList.indexOf(header);
-        if (headerIndex == -1) return;
+        
+        // Find the index of this header in the MASTER list to update subsequent items
+        int masterIndex = masterList.indexOf(header);
+        if (masterIndex == -1) return;
 
-        for (int i = headerIndex + 1; i < displayList.size(); i++) {
-            Object currentItem = displayList.get(i);
+        // Update selection state for all items under this header in master list
+        for (int i = masterIndex + 1; i < masterList.size(); i++) {
+            Object currentItem = masterList.get(i);
             if (currentItem instanceof SearchResult) {
                 ((SearchResult) currentItem).setExcluded(!isChecked);
             } else if (currentItem instanceof DateHeader) {
                 break;
             }
         }
+        
+        // Refresh display list to show changes
         adapter.notifyDataSetChanged();
+    }
+    
+    // NEW: Handle minimizing/expanding headers
+    @Override
+    public void onHeaderClick(DateHeader header) {
+        // Toggle state
+        header.setExpanded(!header.isExpanded());
+        // Rebuild the visible list based on new expansion states
+        rebuildDisplayList();
     }
 
     private void updateHeaderStateForItem(SearchResult item) {
-        int itemIndex = displayList.indexOf(item);
+        // We must check the MASTER list logic here
+        int itemIndex = masterList.indexOf(item);
         if (itemIndex == -1) return;
 
         DateHeader parentHeader = null;
         for (int i = itemIndex - 1; i >= 0; i--) {
-            if (displayList.get(i) instanceof DateHeader) {
-                parentHeader = (DateHeader) displayList.get(i);
+            if (masterList.get(i) instanceof DateHeader) {
+                parentHeader = (DateHeader) masterList.get(i);
                 break;
             }
         }
         if (parentHeader == null) return;
 
         boolean allIncluded = true;
-        int headerIndex = displayList.indexOf(parentHeader);
-        for (int i = headerIndex + 1; i < displayList.size(); i++) {
-            Object currentItem = displayList.get(i);
+        int headerIndex = masterList.indexOf(parentHeader);
+        for (int i = headerIndex + 1; i < masterList.size(); i++) {
+            Object currentItem = masterList.get(i);
             if (currentItem instanceof SearchResult) {
                 if (((SearchResult) currentItem).isExcluded()) {
                     allIncluded = false;
@@ -1026,6 +1107,12 @@ public class SearchActivity extends Activity implements SearchAdapter.OnItemClic
             }
         }
         parentHeader.setChecked(allIncluded);
+        
+        // Notify adapter if header is visible
+        int displayIndex = displayList.indexOf(parentHeader);
+        if (displayIndex != -1) {
+            adapter.notifyItemChanged(displayIndex);
+        }
     }
 
     public static class SearchResult {
@@ -1155,7 +1242,8 @@ public class SearchActivity extends Activity implements SearchAdapter.OnItemClic
             return siblingFiles;
         }
 
-        for (Object item : displayList) {
+        // Use masterList here to ensure we navigate through all available files
+        for (Object item : masterList) {
             if (item instanceof SearchResult) {
                 SearchResult result = (SearchResult) item;
                 if (result.getPath() != null) {
@@ -1211,7 +1299,8 @@ public class SearchActivity extends Activity implements SearchAdapter.OnItemClic
 
     private void showFileOperationsDialog() {
         final List<SearchResult> selectedResults = new ArrayList<>();
-        for (Object item : displayList) {
+        // Use masterList to ensure selections in collapsed sections are counted
+        for (Object item : masterList) {
             if (item instanceof SearchResult) {
                 SearchResult result = (SearchResult) item;
                 if (!result.isExcluded()) {
@@ -1546,20 +1635,9 @@ public class SearchActivity extends Activity implements SearchAdapter.OnItemClic
             }
 
             if (!movedResults.isEmpty()) {
-                displayList.removeAll(movedResults);
-
-                List<Object> itemsToRemove = new ArrayList<>();
-                for (int i = 0; i < displayList.size(); i++) {
-                    Object currentItem = displayList.get(i);
-                    if (currentItem instanceof DateHeader) {
-                        if (i + 1 >= displayList.size() || displayList.get(i + 1) instanceof DateHeader) {
-                            itemsToRemove.add(currentItem);
-                        }
-                    }
-                }
-                displayList.removeAll(itemsToRemove);
-
-                adapter.notifyDataSetChanged();
+                // Update master list and refresh UI
+                masterList.removeAll(movedResults);
+                rebuildDisplayList();
             }
         }
 
