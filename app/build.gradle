@@ -101,4 +101,8 @@ dependencies {
     implementation "org.libtorrent4j:libtorrent4j-android-arm:$libtorrentVersion"
     implementation "org.libtorrent4j:libtorrent4j-android-x86:$libtorrentVersion"
     implementation "org.libtorrent4j:libtorrent4j-android-x86_64:$libtorrentVersion"
+
+    // ✅ Glide for Image Loading
+    implementation 'com.github.bumptech.glide:glide:4.16.0'
+    annotationProcessor 'com.github.bumptech.glide:compiler:4.16.0'
 }
