@@ -1,0 +1,44 @@
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <!-- Base application theme. -->
+    <style name="Theme.HFS" parent="Theme.MaterialComponents.DayNight.DarkActionBar">
+        <!-- Primary brand color. -->
+        <item name="colorPrimary">@color/hfs_primary_blue</item>
+        <item name="colorPrimaryVariant">@color/hfs_primary_dark</item>
+        <item name="colorOnPrimary">@color/white</item>
+        
+        <!-- Secondary brand color. -->
+        <item name="colorSecondary">@color/hfs_active_green</item>
+        <item name="colorSecondaryVariant">@color/hfs_active_green</item>
+        <item name="colorOnSecondary">@color/black</item>
+        
+        <!-- Status bar color. -->
+        <item name="android:statusBarColor">@color/hfs_background_dark</item>
+        
+        <!-- Window background -->
+        <item name="android:windowBackground">@color/hfs_background_dark</item>
+
+        <!-- Custom HFS Theme Attributes (Resolving the Build Error) -->
+        <!-- These link the amoled, dark, and light colors identified in the log -->
+        <item name="android:textColorPrimary">@color/dt_textColor</item>
+        <item name="android:colorBackground">@color/dt_backgroundColor</item>
+    </style>
+
+    <!-- HFS NoActionBar Theme (Used for Splash and Lock Screen) -->
+    <style name="Theme.HFS.NoActionBar" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/hfs_primary_blue</item>
+        <item name="colorPrimaryVariant">@color/hfs_primary_dark</item>
+        <item name="colorOnPrimary">@color/white</item>
+        <item name="android:statusBarColor">@color/hfs_background_dark</item>
+        <item name="android:windowBackground">@color/hfs_background_dark</item>
+    </style>
+
+    <!-- Custom Style for the Overlay Lock Screen -->
+    <style name="Theme.HFS.LockOverlay" parent="Theme.HFS.NoActionBar">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowContentOverlay">@null</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowIsFloating">false</item>
+        <item name="android:backgroundDimEnabled">true</item>
+    </style>
+</resources>
