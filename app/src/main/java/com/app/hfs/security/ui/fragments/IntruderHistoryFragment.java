@@ -17,7 +17,8 @@ import androidx.recyclerview.widget.GridLayoutManager;
 
 import com.hfs.security.R;
 import com.hfs.security.adapters.IntruderLogAdapter;
-import com.hfs.security.databinding.FragmentIntruderHistoryBinding;
+// CORRECTED IMPORT: Matches fragment_history.xml
+import com.hfs.security.databinding.FragmentHistoryBinding; 
 import com.hfs.security.models.IntruderLog;
 
 import java.io.File;
@@ -26,21 +27,22 @@ import java.util.Collections;
 import java.util.List;
 
 /**
- * Screen for viewing Intruder Evidence (Phase 6 / UI Option 4).
+ * Screen for viewing Intruder Evidence (Phase 6).
  * Scans the hidden internal directory for captured photos and intrusion logs.
  * Displays data in a grid for easy identification of intruders.
  */
 public class IntruderHistoryFragment extends Fragment implements IntruderLogAdapter.OnLogActionListener {
 
-    private FragmentIntruderHistoryBinding binding;
+    // CORRECTED BINDING CLASS NAME
+    private FragmentHistoryBinding binding;
     private IntruderLogAdapter adapter;
     private List<IntruderLog> intruderLogList;
 
     @Nullable
     @Override
     public View onCreateView(@NonNull LayoutInflater inflater, @Nullable ViewGroup container, @Nullable Bundle savedInstanceState) {
-        // Initialize ViewBinding for the history layout
-        binding = FragmentIntruderHistoryBinding.inflate(inflater, container, false);
+        // Initialize ViewBinding (Matches fragment_history.xml)
+        binding = FragmentHistoryBinding.inflate(inflater, container, false);
         return binding.getRoot();
     }
 
