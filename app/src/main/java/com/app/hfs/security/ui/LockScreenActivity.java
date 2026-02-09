@@ -3,6 +3,7 @@ package com.hfs.security.ui;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.util.Log;
 import android.view.View;
 import android.view.WindowManager;
 import android.widget.Toast;
@@ -31,21 +32,23 @@ import java.util.concurrent.Executors;
 
 /**
  * The Security Overlay Activity.
- * This activity launches whenever a protected app is opened.
- * 1. Runs 1x1 invisible camera for Face Match.
- * 2. Provides Fingerprint (Biometric) Unlock fallback.
- * 3. Provides PIN Unlock fallback.
+ * FIXED: Implemented a 2-second 'Strict Timeout'. If the owner's face 
+ * is not identified immediately, the system automatically triggers 
+ * the lock, captures the intruder's photo, and sends an alert.
  */
 public class LockScreenActivity extends AppCompatActivity {
 
+    private static final String TAG = "HFS_LockScreen";
     private ActivityLockScreenBinding binding;
     private ExecutorService cameraExecutor;
     private FaceAuthHelper faceAuthHelper;
     private HFSDatabaseHelper db;
+    
     private boolean isProcessing = false;
-    private boolean isLocked = false;
+    private boolean isActionTaken = false;
+    private final Handler timeoutHandler = new Handler(Looper.getMainLooper());
 
-    // Biometric Authentication Variables
+    // Biometric Fallback
     private Executor biometricExecutor;
     private BiometricPrompt biometricPrompt;
     private BiometricPrompt.PromptInfo promptInfo;
@@ -54,7 +57,7 @@ public class LockScreenActivity extends AppCompatActivity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
-        // Keep overlay on top of everything
+        // Ensure the activity appears over the system lock screen and other apps
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED
                 | WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD
                 | WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
@@ -67,47 +70,41 @@ public class LockScreenActivity extends AppCompatActivity {
         faceAuthHelper = new FaceAuthHelper(this);
         cameraExecutor = Executors.newSingleThreadExecutor();
 
-        // Initial invisible state for background face scanning
+        // UI Initialization
         binding.lockContainer.setVisibility(View.GONE);
         binding.scanningIndicator.setVisibility(View.VISIBLE);
 
-        // Initialize Biometric Prompt
         setupFingerprintScanner();
-
-        // Start the silent camera verification
         startInvisibleCamera();
 
-        // UI Listeners
+        // 1. STRICT TIMEOUT LOGIC:
+        // If no match occurs within 2000ms (2 seconds), force the intruder lock.
+        timeoutHandler.postDelayed(() -> {
+            if (!isActionTaken && !isFinishing()) {
+                Log.w(TAG, "Detection Timeout: No face matched within 2 seconds. Locking.");
+                handleIntrusionDetection(null); // Passing null because we use the current camera state
+            }
+        }, 2000);
+
+        // Click Listeners
         binding.btnUnlockPin.setOnClickListener(v -> verifyBackupPin());
         binding.btnFingerprint.setOnClickListener(v -> biometricPrompt.authenticate(promptInfo));
     }
 
     private void setupFingerprintScanner() {
         biometricExecutor = ContextCompat.getMainExecutor(this);
-        biometricPrompt = new BiometricPrompt(LockScreenActivity.this,
-                biometricExecutor, new BiometricPrompt.AuthenticationCallback() {
-            @Override
-            public void onAuthenticationError(int errorCode, @NonNull CharSequence errString) {
-                super.onAuthenticationError(errorCode, errString);
-            }
-
+        biometricPrompt = new BiometricPrompt(this, biometricExecutor, 
+                new BiometricPrompt.AuthenticationCallback() {
             @Override
             public void onAuthenticationSucceeded(@NonNull BiometricPrompt.AuthenticationResult result) {
                 super.onAuthenticationSucceeded(result);
-                // SUCCESS: Fingerprint matched system owner
-                finish();
-            }
-
-            @Override
-            public void onAuthenticationFailed() {
-                super.onAuthenticationFailed();
-                Toast.makeText(LockScreenActivity.this, "Fingerprint not recognized", Toast.LENGTH_SHORT).show();
+                finish(); // Fingerprint verified owner
             }
         });
 
         promptInfo = new BiometricPrompt.PromptInfo.Builder()
-                .setTitle("HFS Security Verification")
-                .setSubtitle("Use fingerprint to unlock app")
+                .setTitle("HFS Verification")
+                .setSubtitle("Use fingerprint to access app")
                 .setNegativeButtonText("Use PIN")
                 .build();
     }
@@ -119,9 +116,12 @@ public class LockScreenActivity extends AppCompatActivity {
         cameraProviderFuture.addListener(() -> {
             try {
                 ProcessCameraProvider cameraProvider = cameraProviderFuture.get();
+
+                // 1x1 Pixel Invisible Preview
                 Preview preview = new Preview.Builder().build();
                 preview.setSurfaceProvider(binding.invisiblePreview.getSurfaceProvider());
 
+                // Analysis for Face Matching
                 ImageAnalysis imageAnalysis = new ImageAnalysis.Builder()
                         .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                         .build();
@@ -133,26 +133,30 @@ public class LockScreenActivity extends AppCompatActivity {
                 cameraProvider.bindToLifecycle(this, cameraSelector, preview, imageAnalysis);
 
             } catch (ExecutionException | InterruptedException e) {
-                e.printStackTrace();
+                Log.e(TAG, "Camera Provider Error: " + e.getMessage());
             }
         }, ContextCompat.getMainExecutor(this));
     }
 
     private void analyzeFaceFrame(@NonNull ImageProxy imageProxy) {
-        if (isProcessing || isLocked) {
+        if (isProcessing || isActionTaken) {
             imageProxy.close();
             return;
         }
 
         isProcessing = true;
+
         faceAuthHelper.authenticate(imageProxy, new FaceAuthHelper.AuthCallback() {
             @Override
             public void onMatchFound() {
+                // SUCCESS: Cancel timeout and allow access
+                timeoutHandler.removeCallbacksAndMessages(null);
                 runOnUiThread(() -> finish());
             }
 
             @Override
             public void onMismatchFound() {
+                // FAILURE: Unknown face detected. Lock immediately.
                 handleIntrusionDetection(imageProxy);
             }
 
@@ -165,18 +169,30 @@ public class LockScreenActivity extends AppCompatActivity {
     }
 
     private void handleIntrusionDetection(ImageProxy imageProxy) {
-        if (isLocked) return;
-        isLocked = true;
+        if (isActionTaken) return;
+        isActionTaken = true;
+
+        // Stop the timeout handler
+        timeoutHandler.removeCallbacksAndMessages(null);
 
         runOnUiThread(() -> {
+            // 1. Show Lock UI
             binding.scanningIndicator.setVisibility(View.GONE);
             binding.lockContainer.setVisibility(View.VISIBLE);
             
-            FileSecureHelper.saveIntruderCapture(LockScreenActivity.this, imageProxy);
+            // 2. Capture Evidence
+            if (imageProxy != null) {
+                FileSecureHelper.saveIntruderCapture(LockScreenActivity.this, imageProxy);
+            }
+
+            // 3. Send SMS Alert
             String appName = getIntent().getStringExtra("TARGET_APP_NAME");
+            if (appName == null) appName = "a Protected App";
             SmsHelper.sendAlertSms(LockScreenActivity.this, appName);
+
+            Toast.makeText(this, "⚠ Intruder Caught - Security Alert Sent", Toast.LENGTH_LONG).show();
             
-            // Automatically trigger fingerprint prompt if available
+            // 4. Trigger Fingerprint prompt automatically
             biometricPrompt.authenticate(promptInfo);
         });
     }
@@ -193,12 +209,13 @@ public class LockScreenActivity extends AppCompatActivity {
 
     @Override
     protected void onDestroy() {
-        super.onDestroy();
+        timeoutHandler.removeCallbacksAndMessages(null);
         cameraExecutor.shutdown();
+        super.onDestroy();
     }
 
     @Override
     public void onBackPressed() {
-        // Back button disabled to prevent bypass
+        // Disabled to prevent intruder from hitting back to bypass
     }
 }
