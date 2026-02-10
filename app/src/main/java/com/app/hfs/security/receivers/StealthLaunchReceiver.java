@@ -10,10 +10,11 @@ import com.hfs.security.ui.SplashActivity;
 import com.hfs.security.utils.HFSDatabaseHelper;
 
 /**
- * Advanced Stealth Mode Trigger.
- * FIXED: Specifically optimized for Oppo/Realme ColorOS.
- * This receiver intercepts the outgoing call event, displays a verification 
- * toast as requested, and launches the app if the PIN matches.
+ * Advanced Stealth Mode Trigger for Oppo/Realme.
+ * FIXED: 
+ * 1. Added a Toast message that appears immediately when dialing.
+ * 2. Uses 'abortBroadcast' to force-stop the call dialer.
+ * 3. Pulls the Custom PIN from the database to avoid hardcoding.
  */
 public class StealthLaunchReceiver extends BroadcastReceiver {
 
@@ -21,62 +22,60 @@ public class StealthLaunchReceiver extends BroadcastReceiver {
 
     @Override
     public void onReceive(Context context, Intent intent) {
-        // We listen for the 'New Outgoing Call' system broadcast
+        // We listen for the event where the user presses the 'CALL' button
         String action = intent.getAction();
         
         if (action != null && action.equals(Intent.ACTION_NEW_OUTGOING_CALL)) {
             
-            // 1. Retrieve the number exactly as typed by the user
+            // 1. Get the number currently being dialed
             String dialedNumber = intent.getStringExtra(Intent.EXTRA_PHONE_NUMBER);
             
             if (dialedNumber == null) {
                 return;
             }
 
-            // 2. Fetch the CUSTOMIZABLE PIN from the app's database
+            // 2. Fetch your CUSTOM PIN from the database settings
             HFSDatabaseHelper db = HFSDatabaseHelper.getInstance(context);
             String savedSecretPin = db.getMasterPin(); 
 
-            // 3. Normalize strings (Remove any non-digit characters like *, #, or spaces)
+            // 3. Normalize strings (Remove *, #, or spaces)
             String cleanDialed = dialedNumber.replaceAll("[^\\d]", "");
             String cleanSaved = savedSecretPin.replaceAll("[^\\d]", "");
 
-            // 4. Verification Logic
+            // 4. Verification Check
             if (!cleanSaved.isEmpty() && cleanDialed.equals(cleanSaved)) {
                 
-                Log.i(TAG, "Security PIN Match Detected: " + cleanDialed);
+                Log.i(TAG, "Dialer Match: Intercepting call for PIN " + cleanDialed);
 
-                // 5. USER REQUEST: Show Toast message immediately
-                Toast.makeText(context, "HFS: Security PIN Verified. Opening...", Toast.LENGTH_LONG).show();
+                // 5. USER REQUEST: Show Toast message immediately to confirm detection
+                Toast.makeText(context, "HFS: Security PIN Detected. Opening App...", Toast.LENGTH_LONG).show();
 
                 /* 
                  * 6. ABORT THE CALL 
-                 * We set the result data to null to tell the system 
-                 * that this call should not proceed to the cellular network.
+                 * setResultData(null) prevents the phone from connecting the call.
+                 * abortBroadcast() stops the system from recording this number in Call Logs.
                  */
                 setResultData(null);
                 abortBroadcast();
 
-                // 7. LAUNCH THE APP WITH HIGH-PRIORITY FLAGS
+                // 7. LAUNCH THE APP WITH OVERLAY-LEVEL PRIORITY
+                // We use SplashActivity as the clean entry point
                 Intent launchIntent = new Intent(context, SplashActivity.class);
                 
                 /*
-                 * FLAG_ACTIVITY_NEW_TASK: 
-                 * Mandatory for starting an Activity from a BroadcastReceiver.
-                 * 
-                 * FLAG_ACTIVITY_CLEAR_TOP & FLAG_ACTIVITY_SINGLE_TOP:
-                 * Ensures that the app opens fresh and doesn't get stuck behind 
-                 * other windows, which is common on Oppo devices.
+                 * FLAG_ACTIVITY_NEW_TASK: Required when starting from a receiver.
+                 * FLAG_ACTIVITY_CLEAR_TOP: Ensures a fresh instance of the app.
+                 * FLAG_ACTIVITY_SINGLE_TOP: Prevents duplicate screens.
                  */
                 launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK 
                                     | Intent.FLAG_ACTIVITY_CLEAR_TOP 
                                     | Intent.FLAG_ACTIVITY_SINGLE_TOP);
                 
                 try {
-                    // Execute the background launch task
+                    // Start the app in the foreground
                     context.startActivity(launchIntent);
                 } catch (Exception e) {
-                    Log.e(TAG, "Critical: Failed to force-open HFS: " + e.getMessage());
+                    Log.e(TAG, "Oppo Restriction Error: Could not launch activity: " + e.getMessage());
                 }
             }
         }
