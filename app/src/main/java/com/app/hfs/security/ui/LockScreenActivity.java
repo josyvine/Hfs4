@@ -8,6 +8,8 @@ import android.os.Looper;
 import android.util.Log;
 import android.view.View;
 import android.view.WindowManager;
+import android.widget.Toast;
+
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
@@ -17,8 +19,14 @@ import androidx.camera.core.ImageAnalysis;
 import androidx.camera.core.ImageProxy;
 import androidx.camera.core.Preview;
 import androidx.camera.lifecycle.ProcessCameraProvider;
+import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 
+// CRITICAL FIX: Added explicit import for the R class
+import com.hfs.security.R;
+
+import com.google.android.gms.location.FusedLocationProviderClient;
+import com.google.android.gms.location.LocationServices;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.hfs.security.databinding.ActivityLockScreenBinding;
 import com.hfs.security.services.AppMonitorService;
@@ -35,9 +43,10 @@ import java.util.concurrent.Executors;
 /**
  * The Security Overlay Activity.
  * FIXED: 
- * 1. Session Grace logic: Calls AppMonitorService to kill the locking loop.
- * 2. TECHNICAL POPUP: Shows a real Java-style error dialog if identity verification fails.
- * 3. Fingerprint Fail trigger: Sends alert if system sensor mismatch occurs.
+ * 1. Added explicit R import to resolve compilation failure.
+ * 2. Maintained 30s Session Grace Period to kill re-locking loop.
+ * 3. TECHNICAL POPUP: Shows real Java-style error dialog if identity fails.
+ * 4. Fingerprint Fail trigger: Sends alert if system sensor mismatch occurs.
  */
 public class LockScreenActivity extends AppCompatActivity {
 
@@ -60,6 +69,7 @@ public class LockScreenActivity extends AppCompatActivity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
+        // Keep overlay on top of everything
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED
                 | WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD
                 | WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
@@ -80,10 +90,10 @@ public class LockScreenActivity extends AppCompatActivity {
         setupBiometricAuth();
         startInvisibleCamera();
 
-        // 2-Second Watchdog for Verification
+        // Watchdog Timer (2 Seconds)
         watchdogHandler.postDelayed(() -> {
             if (!isActionTaken && !isFinishing()) {
-                showDiagnosticError("java.lang.SecurityException: Identity verification timeout. No face landmarks captured within 2000ms.");
+                showDiagnosticError("java.lang.SecurityException: Identity verification timeout. No face landmarks captured.");
                 triggerIntruderAlert(null);
             }
         }, 2000);
@@ -105,14 +115,14 @@ public class LockScreenActivity extends AppCompatActivity {
             @Override
             public void onAuthenticationFailed() {
                 super.onAuthenticationFailed();
-                // Lost Phone Logic: Fail immediately alerts owner
+                // Alert if system fingerprint fails (Lost Phone Mode)
                 triggerIntruderAlert(null);
             }
         });
 
         promptInfo = new BiometricPrompt.PromptInfo.Builder()
-                .setTitle("HFS Security")
-                .setSubtitle("Confirm fingerprint to unlock")
+                .setTitle("HFS Verification")
+                .setSubtitle("Authenticate to access your app")
                 .setNegativeButtonText("Use PIN")
                 .build();
     }
@@ -120,15 +130,12 @@ public class LockScreenActivity extends AppCompatActivity {
     private void onSecurityVerified() {
         watchdogHandler.removeCallbacksAndMessages(null);
         if (targetPackage != null) {
+            // Tells service to ignore this app for 30 seconds
             AppMonitorService.unlockSession(targetPackage);
         }
         finish();
     }
 
-    /**
-     * USER REQUEST: Exact Java Error Popup logic.
-     * Shows technical details of why verification failed.
-     */
     private void showDiagnosticError(String errorDetail) {
         runOnUiThread(() -> {
             new AlertDialog.Builder(this, R.style.Theme_HFS_Dialog)
@@ -182,15 +189,13 @@ public class LockScreenActivity extends AppCompatActivity {
 
             @Override
             public void onMismatchFound() {
-                // Fetch technical ratio mismatch details for the popup
                 String diagnostic = faceAuthHelper.getLastDiagnosticInfo();
-                showDiagnosticError("com.hfs.biometric.MismatchException: Face detected but does not match Owner Landmark Map.\n" + diagnostic);
+                showDiagnosticError("com.hfs.biometric.MismatchException: Proportion mapping failed.\n" + diagnostic);
                 triggerIntruderAlert(imageProxy);
             }
 
             @Override
             public void onError(String error) {
-                Log.e(TAG, "Diagnostic: " + error);
                 isProcessing = false;
                 imageProxy.close();
             }
@@ -210,16 +215,11 @@ public class LockScreenActivity extends AppCompatActivity {
                 FileSecureHelper.saveIntruderCapture(LockScreenActivity.this, imageProxy);
             }
 
-            sendSecurityAlert();
+            // Sends SMS with 3-msg cooldown limit and GPS
+            SmsHelper.sendAlertSms(this, getIntent().getStringExtra("TARGET_APP_NAME"), null);
+            
             biometricPrompt.authenticate(promptInfo);
         });
-    }
-
-    private void sendSecurityAlert() {
-        String appName = getIntent().getStringExtra("TARGET_APP_NAME");
-        if (appName == null) appName = "Protected App";
-        // Logic for "3 messages in 5 minutes" moved to SmsHelper
-        SmsHelper.sendAlertSms(this, appName, null);
     }
 
     private void checkPinAndUnlock() {
