@@ -1,5 +1,8 @@
 package com.hfs.security.ui;
 
+import android.Manifest;
+import android.content.pm.PackageManager;
+import android.location.Location;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -16,8 +19,11 @@ import androidx.camera.core.ImageAnalysis;
 import androidx.camera.core.ImageProxy;
 import androidx.camera.core.Preview;
 import androidx.camera.lifecycle.ProcessCameraProvider;
+import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 
+import com.google.android.gms.location.FusedLocationProviderClient;
+import com.google.android.gms.location.LocationServices;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.hfs.security.databinding.ActivityLockScreenBinding;
 import com.hfs.security.utils.FaceAuthHelper;
@@ -31,9 +37,12 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * The Security Overlay Activity (Lock Screen).
- * FIXED: Implemented a 2000ms (2s) strict timeout to prevent the 'Verifying Identity' loop.
- * If the owner is not recognized instantly, the system locks the app and logs the intruder.
+ * The Security Overlay Activity.
+ * FIXED: 
+ * 1. Added GPS Location support (Google Maps link).
+ * 2. Added Fingerprint Failure trigger (Immediate alert if scan fails).
+ * 3. Resolved 'Verifying Identity' loop with a 2-second watchdog.
+ * 4. Optimized for Oppo/Realme background activity flags.
  */
 public class LockScreenActivity extends AppCompatActivity {
 
@@ -42,12 +51,13 @@ public class LockScreenActivity extends AppCompatActivity {
     private ExecutorService cameraExecutor;
     private FaceAuthHelper faceAuthHelper;
     private HFSDatabaseHelper db;
-    
-    private boolean isProcessing = false;
+    private FusedLocationProviderClient fusedLocationClient;
+
     private boolean isActionTaken = false;
+    private boolean isProcessing = false;
     private final Handler watchdogHandler = new Handler(Looper.getMainLooper());
 
-    // Biometric (Fingerprint) Variables
+    // Biometric Logic
     private Executor biometricExecutor;
     private BiometricPrompt biometricPrompt;
     private BiometricPrompt.PromptInfo promptInfo;
@@ -56,7 +66,7 @@ public class LockScreenActivity extends AppCompatActivity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
-        // Flag setting for Oppo/Realme to ensure overlay appears over everything
+        // Professional Flags: Ensure overlay is on top of system locks and notifications
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED
                 | WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD
                 | WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
@@ -68,26 +78,25 @@ public class LockScreenActivity extends AppCompatActivity {
         db = HFSDatabaseHelper.getInstance(this);
         faceAuthHelper = new FaceAuthHelper(this);
         cameraExecutor = Executors.newSingleThreadExecutor();
+        fusedLocationClient = LocationServices.getFusedLocationProviderClient(this);
 
-        // 1. Initial UI State (Hidden lock, active scanning)
+        // Initial View State
         binding.lockContainer.setVisibility(View.GONE);
         binding.scanningIndicator.setVisibility(View.VISIBLE);
 
-        // 2. Initialize Biometrics and Camera
         setupBiometricAuth();
         startInvisibleCamera();
 
-        // 3. FIX: THE WATCHDOG TIMER (2 Seconds)
-        // This is what stops the 'Verifying Identity' loop. 
-        // If after 2 seconds no 'Match' is found, we trigger the lock.
+        // FIX: THE WATCHDOG TIMER (2 Seconds)
+        // This ensures the "Verifying Identity" doesn't loop forever.
         watchdogHandler.postDelayed(() -> {
             if (!isActionTaken && !isFinishing()) {
-                Log.w(TAG, "Watchdog: Identity verification timed out. Triggering Lockdown.");
-                handleIntrusionDetection(null); 
+                Log.w(TAG, "Watchdog Timeout: Verification failed. Locking.");
+                triggerIntruderAlert(null);
             }
         }, 2000);
 
-        // Button Listeners
+        // UI Listeners
         binding.btnUnlockPin.setOnClickListener(v -> checkPinAndUnlock());
         binding.btnFingerprint.setOnClickListener(v -> biometricPrompt.authenticate(promptInfo));
     }
@@ -96,17 +105,29 @@ public class LockScreenActivity extends AppCompatActivity {
         biometricExecutor = ContextCompat.getMainExecutor(this);
         biometricPrompt = new BiometricPrompt(this, biometricExecutor, 
                 new BiometricPrompt.AuthenticationCallback() {
+            
             @Override
             public void onAuthenticationSucceeded(@NonNull BiometricPrompt.AuthenticationResult result) {
                 super.onAuthenticationSucceeded(result);
-                // Owner used fingerprint - Close lock screen
+                // OWNER MATCH: Cancel all timers and close
+                watchdogHandler.removeCallbacksAndMessages(null);
                 finish();
+            }
+
+            @Override
+            public void onAuthenticationFailed() {
+                super.onAuthenticationFailed();
+                // ENHANCEMENT: SENSITIVE LOCKDOWN
+                // If a fingerprint attempt is made and fails, trigger alert immediately.
+                Log.e(TAG, "Biometric Attempt Failed. Triggering Intruder Alert.");
+                triggerIntruderAlert(null);
+                Toast.makeText(LockScreenActivity.this, "Security Breach: Identity Mismatch", Toast.LENGTH_SHORT).show();
             }
         });
 
         promptInfo = new BiometricPrompt.PromptInfo.Builder()
-                .setTitle("HFS Security")
-                .setSubtitle("Confirm fingerprint to unlock")
+                .setTitle("HFS Security Verification")
+                .setSubtitle("Confirm identity to access app")
                 .setNegativeButtonText("Use PIN")
                 .build();
     }
@@ -119,11 +140,9 @@ public class LockScreenActivity extends AppCompatActivity {
             try {
                 ProcessCameraProvider cameraProvider = cameraProviderFuture.get();
 
-                // Setup 1x1 invisible preview
                 Preview preview = new Preview.Builder().build();
                 preview.setSurfaceProvider(binding.invisiblePreview.getSurfaceProvider());
 
-                // Setup Image Analysis
                 ImageAnalysis imageAnalysis = new ImageAnalysis.Builder()
                         .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                         .build();
@@ -131,14 +150,12 @@ public class LockScreenActivity extends AppCompatActivity {
                 imageAnalysis.setAnalyzer(cameraExecutor, this::processCameraFrame);
 
                 CameraSelector cameraSelector = CameraSelector.DEFAULT_FRONT_CAMERA;
-
                 cameraProvider.unbindAll();
                 cameraProvider.bindToLifecycle(this, cameraSelector, preview, imageAnalysis);
 
             } catch (ExecutionException | InterruptedException e) {
-                Log.e(TAG, "CameraX Initialization failed: " + e.getMessage());
-                // If camera hardware fails, trigger lock for safety
-                handleIntrusionDetection(null);
+                Log.e(TAG, "Camera Setup Error: " + e.getMessage());
+                triggerIntruderAlert(null); // Lock if camera is blocked
             }
         }, ContextCompat.getMainExecutor(this));
     }
@@ -150,19 +167,17 @@ public class LockScreenActivity extends AppCompatActivity {
         }
 
         isProcessing = true;
-
         faceAuthHelper.authenticate(imageProxy, new FaceAuthHelper.AuthCallback() {
             @Override
             public void onMatchFound() {
-                // SUCCESS: Owner identified. Cancel timeout and close.
                 watchdogHandler.removeCallbacksAndMessages(null);
                 runOnUiThread(() -> finish());
             }
 
             @Override
             public void onMismatchFound() {
-                // FAILURE: Unknown face (Mom/Intruder). Lock immediately.
-                handleIntrusionDetection(imageProxy);
+                // Known intruder found - lock instantly
+                triggerIntruderAlert(imageProxy);
             }
 
             @Override
@@ -174,34 +189,55 @@ public class LockScreenActivity extends AppCompatActivity {
     }
 
     /**
-     * Phase 3 Logic: Triggers the intruder UI, saves photo, and sends SMS.
+     * Enhanced Lockdown Logic:
+     * 1. Captures Face.
+     * 2. Fetches GPS Location.
+     * 3. Sends SMS with Google Maps Link.
      */
-    private void handleIntrusionDetection(ImageProxy imageProxy) {
+    private void triggerIntruderAlert(ImageProxy imageProxy) {
         if (isActionTaken) return;
         isActionTaken = true;
 
-        // Clear the 2s timer as we are taking action now
         watchdogHandler.removeCallbacksAndMessages(null);
 
         runOnUiThread(() -> {
-            // 1. Update UI to Forbidden State
+            // Show the Denial UI
             binding.scanningIndicator.setVisibility(View.GONE);
             binding.lockContainer.setVisibility(View.VISIBLE);
-            
-            // 2. Secretly save the intruder's photo if available
+
+            // Save the photo secretly
             if (imageProxy != null) {
                 FileSecureHelper.saveIntruderCapture(LockScreenActivity.this, imageProxy);
             }
 
-            // 3. Send the Alert SMS to the Trusted Number
-            String appName = getIntent().getStringExtra("TARGET_APP_NAME");
-            if (appName == null) appName = "Protected App";
-            SmsHelper.sendAlertSms(LockScreenActivity.this, appName);
-
-            Toast.makeText(this, "⚠ Unauthorized Access Detected", Toast.LENGTH_LONG).show();
+            // Fetch Location and Send SMS
+            getGPSAndSendSms();
             
-            // 4. Force biometric prompt for the owner to regain control
+            // Re-trigger biometric prompt for the real owner
             biometricPrompt.authenticate(promptInfo);
+        });
+    }
+
+    private void getGPSAndSendSms() {
+        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            // Permission missing? Send SMS without location as fallback
+            SmsHelper.sendAlertSms(this, getIntent().getStringExtra("TARGET_APP_NAME"), null);
+            return;
+        }
+
+        fusedLocationClient.getLastLocation().addOnSuccessListener(this, location -> {
+            String mapLink = null;
+            if (location != null) {
+                mapLink = "https://maps.google.com/maps?q=" + location.getLatitude() + "," + location.getLongitude();
+            }
+            
+            String appName = getIntent().getStringExtra("TARGET_APP_NAME");
+            if (appName == null) appName = "HFS Secure App";
+
+            // Send standard alert with Map link
+            SmsHelper.sendAlertSms(LockScreenActivity.this, appName, mapLink);
+            
+            // ENHANCEMENT: MMS Attempt (Future step)
         });
     }
 
@@ -210,7 +246,7 @@ public class LockScreenActivity extends AppCompatActivity {
         if (input.equals(db.getMasterPin())) {
             finish();
         } else {
-            binding.tvErrorMsg.setText("Invalid PIN. Access Denied.");
+            binding.tvErrorMsg.setText("Access Denied. Incorrect Master PIN.");
             binding.etPinInput.setText("");
         }
     }
@@ -224,6 +260,6 @@ public class LockScreenActivity extends AppCompatActivity {
 
     @Override
     public void onBackPressed() {
-        // Prevent back button bypass
+        // Prevent bypass via back key
     }
 }
