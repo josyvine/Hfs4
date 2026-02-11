@@ -22,18 +22,17 @@ import androidx.camera.lifecycle.ProcessCameraProvider;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 
-// CRITICAL FIX: Added explicit import for the R class
+// Mandatory R import to prevent build errors
 import com.hfs.security.R;
-
-import com.google.android.gms.location.FusedLocationProviderClient;
-import com.google.android.gms.location.LocationServices;
-import com.google.common.util.concurrent.ListenableFuture;
 import com.hfs.security.databinding.ActivityLockScreenBinding;
 import com.hfs.security.services.AppMonitorService;
 import com.hfs.security.utils.FaceAuthHelper;
 import com.hfs.security.utils.FileSecureHelper;
 import com.hfs.security.utils.HFSDatabaseHelper;
+import com.hfs.security.utils.LocationHelper;
 import com.hfs.security.utils.SmsHelper;
+
+import com.google.common.util.concurrent.ListenableFuture;
 
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
@@ -41,12 +40,12 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * The Security Overlay Activity.
+ * The Security Overlay Activity (Lock Screen).
  * FIXED: 
- * 1. Added explicit R import to resolve compilation failure.
- * 2. Maintained 30s Session Grace Period to kill re-locking loop.
- * 3. TECHNICAL POPUP: Shows real Java-style error dialog if identity fails.
- * 4. Fingerprint Fail trigger: Sends alert if system sensor mismatch occurs.
+ * 1. Strict Biometric Threshold: Rejects intruders (like Mom) based on geometry.
+ * 2. GPS Integration: Fetches Google Maps link for intruder alerts.
+ * 3. Loop Killer: Calls AppMonitorService to stop infinite locking.
+ * 4. Fingerprint Fail Alert: Detects wrong finger on sensor and alerts owner.
  */
 public class LockScreenActivity extends AppCompatActivity {
 
@@ -69,7 +68,7 @@ public class LockScreenActivity extends AppCompatActivity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
-        // Keep overlay on top of everything
+        // Security Window Flags
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED
                 | WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD
                 | WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
@@ -90,10 +89,10 @@ public class LockScreenActivity extends AppCompatActivity {
         setupBiometricAuth();
         startInvisibleCamera();
 
-        // Watchdog Timer (2 Seconds)
+        // 2-Second Verification Watchdog
         watchdogHandler.postDelayed(() -> {
             if (!isActionTaken && !isFinishing()) {
-                showDiagnosticError("java.lang.SecurityException: Identity verification timeout. No face landmarks captured.");
+                showDiagnosticError("java.lang.SecurityException: Identity verification timeout. Camera failed to capture landmarks.");
                 triggerIntruderAlert(null);
             }
         }, 2000);
@@ -109,19 +108,21 @@ public class LockScreenActivity extends AppCompatActivity {
             @Override
             public void onAuthenticationSucceeded(@NonNull BiometricPrompt.AuthenticationResult result) {
                 super.onAuthenticationSucceeded(result);
+                // SUCCESS: Close and stop the re-locking loop
                 onSecurityVerified();
             }
 
             @Override
             public void onAuthenticationFailed() {
                 super.onAuthenticationFailed();
-                // Alert if system fingerprint fails (Lost Phone Mode)
+                // FINGERPRINT MISMATCH: Trigger immediate SMS alert with GPS
+                Log.e(TAG, "Biometric mismatch detected on sensor. Alerting...");
                 triggerIntruderAlert(null);
             }
         });
 
         promptInfo = new BiometricPrompt.PromptInfo.Builder()
-                .setTitle("HFS Verification")
+                .setTitle("HFS Identity Check")
                 .setSubtitle("Authenticate to access your app")
                 .setNegativeButtonText("Use PIN")
                 .build();
@@ -130,7 +131,7 @@ public class LockScreenActivity extends AppCompatActivity {
     private void onSecurityVerified() {
         watchdogHandler.removeCallbacksAndMessages(null);
         if (targetPackage != null) {
-            // Tells service to ignore this app for 30 seconds
+            // STOP THE LOOP: Tells service to ignore this app for 30s
             AppMonitorService.unlockSession(targetPackage);
         }
         finish();
@@ -139,8 +140,8 @@ public class LockScreenActivity extends AppCompatActivity {
     private void showDiagnosticError(String errorDetail) {
         runOnUiThread(() -> {
             new AlertDialog.Builder(this, R.style.Theme_HFS_Dialog)
-                .setTitle("Security Identity Failure")
-                .setMessage("A fatal biometric logic error occurred:\n\n" + errorDetail)
+                .setTitle("Identity Mismatch Details")
+                .setMessage(errorDetail)
                 .setCancelable(false)
                 .setPositiveButton("CLOSE", (dialog, which) -> dialog.dismiss())
                 .show();
@@ -168,7 +169,6 @@ public class LockScreenActivity extends AppCompatActivity {
                 cameraProvider.bindToLifecycle(this, cameraSelector, preview, imageAnalysis);
 
             } catch (ExecutionException | InterruptedException e) {
-                showDiagnosticError("android.hardware.camera2.CameraAccessException: " + e.getMessage());
                 triggerIntruderAlert(null);
             }
         }, ContextCompat.getMainExecutor(this));
@@ -189,8 +189,9 @@ public class LockScreenActivity extends AppCompatActivity {
 
             @Override
             public void onMismatchFound() {
+                // Known intruder found - trigger the lockdown
                 String diagnostic = faceAuthHelper.getLastDiagnosticInfo();
-                showDiagnosticError("com.hfs.biometric.MismatchException: Proportion mapping failed.\n" + diagnostic);
+                showDiagnosticError(diagnostic);
                 triggerIntruderAlert(imageProxy);
             }
 
@@ -202,6 +203,12 @@ public class LockScreenActivity extends AppCompatActivity {
         });
     }
 
+    /**
+     * The Full Lockdown Sequence:
+     * 1. Captures Photo
+     * 2. Captures GPS Location
+     * 3. Sends External SMS (+91 formatting)
+     */
     private void triggerIntruderAlert(ImageProxy imageProxy) {
         if (isActionTaken) return;
         isActionTaken = true;
@@ -211,14 +218,34 @@ public class LockScreenActivity extends AppCompatActivity {
             binding.scanningIndicator.setVisibility(View.GONE);
             binding.lockContainer.setVisibility(View.VISIBLE);
 
+            // Save intruder photo locally
             if (imageProxy != null) {
                 FileSecureHelper.saveIntruderCapture(LockScreenActivity.this, imageProxy);
             }
 
-            // Sends SMS with 3-msg cooldown limit and GPS
-            SmsHelper.sendAlertSms(this, getIntent().getStringExtra("TARGET_APP_NAME"), null);
+            // Fetch Location and Send Alert to Saved Number
+            getGPSAndSendAlert();
             
+            // Re-trigger fingerprint prompt for the real owner
             biometricPrompt.authenticate(promptInfo);
+        });
+    }
+
+    private void getGPSAndSendAlert() {
+        String appName = getIntent().getStringExtra("TARGET_APP_NAME");
+        if (appName == null) appName = "Protected Files";
+
+        LocationHelper.getDeviceLocation(this, new LocationHelper.LocationResultCallback() {
+            @Override
+            public void onLocationFound(String mapLink) {
+                // Sends formatted SMS alert (Limited to 3 msgs / 5 mins)
+                SmsHelper.sendAlertSms(LockScreenActivity.this, appName, mapLink);
+            }
+
+            @Override
+            public void onLocationFailed(String error) {
+                SmsHelper.sendAlertSms(LockScreenActivity.this, appName, "GPS Signal Lost");
+            }
         });
     }
 
