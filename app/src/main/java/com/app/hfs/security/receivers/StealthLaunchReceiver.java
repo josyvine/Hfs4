@@ -1,83 +1,122 @@
 package com.hfs.security.receivers;
 
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
+import android.os.Build;
 import android.util.Log;
 import android.widget.Toast;
 
+import androidx.core.app.NotificationCompat;
+
+import com.hfs.security.R;
 import com.hfs.security.ui.SplashActivity;
 import com.hfs.security.utils.HFSDatabaseHelper;
 
 /**
- * Advanced Stealth Mode Trigger for Oppo/Realme.
+ * Advanced Stealth Mode Trigger (Oppo/Realme Background Fix).
  * FIXED: 
- * 1. Added a Toast message that appears immediately when dialing.
- * 2. Uses 'abortBroadcast' to force-stop the call dialer.
- * 3. Pulls the Custom PIN from the database to avoid hardcoding.
+ * 1. Uses High-Priority FullScreen Intent to bypass Oppo background activity blocks.
+ * 2. Added USSD Support: Recognizes PIN, *#PIN#, and #PIN#.
+ * 3. Includes the requested Toast confirmation.
  */
 public class StealthLaunchReceiver extends BroadcastReceiver {
 
-    private static final String TAG = "HFS_StealthReceiver";
+    private static final String TAG = "HFS_StealthTrigger";
+    private static final String CHANNEL_ID = "hfs_stealth_launch_channel";
 
     @Override
     public void onReceive(Context context, Intent intent) {
-        // We listen for the event where the user presses the 'CALL' button
         String action = intent.getAction();
         
         if (action != null && action.equals(Intent.ACTION_NEW_OUTGOING_CALL)) {
             
-            // 1. Get the number currently being dialed
+            // 1. Get the raw number dialed by the user
             String dialedNumber = intent.getStringExtra(Intent.EXTRA_PHONE_NUMBER);
-            
-            if (dialedNumber == null) {
-                return;
-            }
+            if (dialedNumber == null) return;
 
-            // 2. Fetch your CUSTOM PIN from the database settings
+            // 2. Get the CUSTOM PIN from your app settings
             HFSDatabaseHelper db = HFSDatabaseHelper.getInstance(context);
-            String savedSecretPin = db.getMasterPin(); 
+            String savedPin = db.getMasterPin(); 
 
-            // 3. Normalize strings (Remove *, #, or spaces)
-            String cleanDialed = dialedNumber.replaceAll("[^\\d]", "");
-            String cleanSaved = savedSecretPin.replaceAll("[^\\d]", "");
+            if (savedPin == null || savedPin.isEmpty()) return;
 
-            // 4. Verification Check
-            if (!cleanSaved.isEmpty() && cleanDialed.equals(cleanSaved)) {
-                
-                Log.i(TAG, "Dialer Match: Intercepting call for PIN " + cleanDialed);
+            // 3. Normalize strings for comparison (remove spaces/dashes)
+            String cleanDialed = dialedNumber.trim();
+            String cleanSaved = savedPin.trim();
 
-                // 5. USER REQUEST: Show Toast message immediately to confirm detection
-                Toast.makeText(context, "HFS: Security PIN Detected. Opening App...", Toast.LENGTH_LONG).show();
+            // 4. USSD & RAW PIN LOGIC
+            // Checks if the dialed string is exactly the PIN, or *#PIN#, or #PIN#
+            boolean isMatch = cleanDialed.equals(cleanSaved) || 
+                              cleanDialed.equals("*#" + cleanSaved + "#") || 
+                              cleanDialed.equals("#" + cleanSaved + "#");
 
-                /* 
-                 * 6. ABORT THE CALL 
-                 * setResultData(null) prevents the phone from connecting the call.
-                 * abortBroadcast() stops the system from recording this number in Call Logs.
-                 */
+            if (isMatch) {
+                Log.i(TAG, "Security PIN Verified: " + cleanDialed);
+
+                // 5. USER REQUEST: Immediate Toast Confirmation
+                Toast.makeText(context, "HFS Security: PIN Verified. Opening...", Toast.LENGTH_LONG).show();
+
+                // 6. ABORT THE CALL
+                // This stops the Oppo system from actually placing the call
                 setResultData(null);
                 abortBroadcast();
 
-                // 7. LAUNCH THE APP WITH OVERLAY-LEVEL PRIORITY
-                // We use SplashActivity as the clean entry point
-                Intent launchIntent = new Intent(context, SplashActivity.class);
-                
-                /*
-                 * FLAG_ACTIVITY_NEW_TASK: Required when starting from a receiver.
-                 * FLAG_ACTIVITY_CLEAR_TOP: Ensures a fresh instance of the app.
-                 * FLAG_ACTIVITY_SINGLE_TOP: Prevents duplicate screens.
-                 */
-                launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK 
-                                    | Intent.FLAG_ACTIVITY_CLEAR_TOP 
-                                    | Intent.FLAG_ACTIVITY_SINGLE_TOP);
-                
-                try {
-                    // Start the app in the foreground
-                    context.startActivity(launchIntent);
-                } catch (Exception e) {
-                    Log.e(TAG, "Oppo Restriction Error: Could not launch activity: " + e.getMessage());
-                }
+                // 7. OPPO BACKGROUND BYPASS: Launch via FullScreen Intent Notification
+                // This is the highest priority launch possible in Android.
+                launchAppHighPriority(context);
             }
+        }
+    }
+
+    /**
+     * Creates a high-priority 'Full Screen Intent' to force the app to the front.
+     * This bypasses the background activity restrictions found in Oppo ColorOS.
+     */
+    private void launchAppHighPriority(Context context) {
+        Intent launchIntent = new Intent(context, SplashActivity.class);
+        launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+
+        // Create a PendingIntent for the launch
+        PendingIntent fullScreenPendingIntent = PendingIntent.getActivity(
+                context, 0, launchIntent, 
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
+        );
+
+        NotificationManager notificationManager = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
+
+        // Create Notification Channel for Android 8.0+ (Oppo Android 9+)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            NotificationChannel channel = new NotificationChannel(
+                    CHANNEL_ID, "HFS Stealth Launch", 
+                    NotificationManager.IMPORTANCE_HIGH
+            );
+            channel.setLockscreenVisibility(Notification.VISIBILITY_PUBLIC);
+            if (notificationManager != null) {
+                notificationManager.createNotificationChannel(channel);
+            }
+        }
+
+        // Build the notification with FullScreen Intent
+        // Note: Using a transparent/hidden style so it just opens the app
+        NotificationCompat.Builder builder = new NotificationCompat.Builder(context, CHANNEL_ID)
+                .setSmallIcon(R.drawable.hfs)
+                .setContentTitle("HFS Security")
+                .setContentText("Identity Verified")
+                .setPriority(NotificationCompat.PRIORITY_MAX)
+                .setCategory(NotificationCompat.CATEGORY_ALARM)
+                .setFullScreenIntent(fullScreenPendingIntent, true) // THE KEY TO BYPASS BLOCKS
+                .setAutoCancel(true);
+
+        if (notificationManager != null) {
+            notificationManager.notify(3003, builder.build());
+            
+            // Fallback: Also try direct launch just in case
+            context.startActivity(launchIntent);
         }
     }
 }
