@@ -19,10 +19,11 @@ import com.hfs.security.utils.HFSDatabaseHelper;
 
 /**
  * Advanced Stealth Mode Receiver.
- * FIXED: Implemented the 'Sticky Notification' plan to bypass Oppo background blocks.
- * 1. Detects PIN or *#PIN# USSD.
- * 2. Aborts call and shows a high-priority 'Verified' notification.
- * 3. Clicking notification opens the StealthUnlockActivity for Fingerprint access.
+ * FIXED & UPDATED: 
+ * 1. Supports the 'Toggle' plan: Triggers whether the app is hidden or visible.
+ * 2. Recognizes raw PIN, *#PIN#, and #PIN# USSD formats.
+ * 3. Uses High-Priority Sticky Notifications to bypass Oppo background restrictions.
+ * 4. Bridges to the StealthUnlockActivity for secure Hide/Unhide toggling.
  */
 public class StealthLaunchReceiver extends BroadcastReceiver {
 
@@ -32,83 +33,99 @@ public class StealthLaunchReceiver extends BroadcastReceiver {
 
     @Override
     public void onReceive(Context context, Intent intent) {
+        // We listen specifically for the moment the 'CALL' button is pressed
         String action = intent.getAction();
         
         if (action != null && action.equals(Intent.ACTION_NEW_OUTGOING_CALL)) {
             
-            // 1. Get the number dialed
+            // 1. Extract the number dialed from the system intent
             String dialedNumber = intent.getStringExtra(Intent.EXTRA_PHONE_NUMBER);
             if (dialedNumber == null) return;
 
-            // 2. Get saved Custom PIN
+            // 2. Fetch the user's CUSTOM SECRET PIN from the database
             HFSDatabaseHelper db = HFSDatabaseHelper.getInstance(context);
             String savedPin = db.getMasterPin(); 
 
             if (savedPin == null || savedPin.isEmpty()) return;
 
-            // 3. NORMALIZE FOR USSD SUPPORT
-            // This captures: PIN, *#PIN#, and #PIN#
+            // 3. Normalize strings for accurate comparison
             String cleanDialed = dialedNumber.trim();
             String cleanSaved = savedPin.trim();
 
+            // 4. USSD & PIN MATCH LOGIC
+            // Verifies if input matches PIN, *#PIN#, or #PIN#
             boolean isMatch = cleanDialed.equals(cleanSaved) || 
                               cleanDialed.equals("*#" + cleanSaved + "#") || 
                               cleanDialed.equals("#" + cleanSaved + "#");
 
             if (isMatch) {
-                Log.i(TAG, "Stealth Match confirmed for PIN: " + cleanSaved);
+                Log.i(TAG, "Stealth Authentication Success for PIN: " + cleanSaved);
 
-                // 4. ABORT CALL IMMEDIATELY
+                // 5. ABORT CALL IMMEDIATELY
+                // This stops the cellular network from placing the call and 
+                // prevents the secret PIN from appearing in the system call logs.
                 setResultData(null);
                 abortBroadcast();
 
-                // 5. SHOW TOAST AS REQUESTED
-                Toast.makeText(context, "HFS: Security PIN Verified. Check Notifications.", Toast.LENGTH_LONG).show();
+                // 6. FEEDBACK: Immediate Toast confirmation as requested
+                Toast.makeText(context, "HFS: Identity Verified. Open Notification to proceed.", Toast.LENGTH_LONG).show();
 
-                // 6. EXECUTE THE 'STICKY NOTIFICATION' PLAN
+                // 7. TRIGGER THE STICKY NOTIFICATION
+                // This notification serves as the portal to the Hide/Unhide popup.
                 showStickyVerifiedNotification(context);
             }
         }
     }
 
     /**
-     * Creates a high-priority notification that Oppo cannot ignore.
-     * Clicks lead to the StealthUnlockActivity (The Fingerprint/Unhide Popup).
+     * Constructs a high-priority system notification.
+     * Clicks will launch the StealthUnlockActivity popup.
      */
     private void showStickyVerifiedNotification(Context context) {
-        // Intent to open the new Popup Activity
+        // Prepare the intent for the Stealth Popup Activity
         Intent popupIntent = new Intent(context, StealthUnlockActivity.class);
         popupIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
 
+        // Standard PendingIntent flags for modern Android compatibility
+        int flags = PendingIntent.FLAG_UPDATE_CURRENT;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            flags |= PendingIntent.FLAG_IMMUTABLE;
+        }
+
         PendingIntent pendingIntent = PendingIntent.getActivity(
-                context, 0, popupIntent, 
-                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
+                context, 
+                0, 
+                popupIntent, 
+                flags
         );
 
         NotificationManager notificationManager = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
 
-        // Create Channel for Android 8.0+
+        // Create the Security Notification Channel for Android O (API 26) and above
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             NotificationChannel channel = new NotificationChannel(
-                    STEALTH_CHANNEL_ID, "HFS Identity Verification", 
+                    STEALTH_CHANNEL_ID, 
+                    "HFS Identity Verification", 
                     NotificationManager.IMPORTANCE_HIGH
             );
             channel.setLockscreenVisibility(Notification.VISIBILITY_PUBLIC);
+            channel.setDescription("Portal for HFS Stealth Mode access");
+            
             if (notificationManager != null) {
                 notificationManager.createNotificationChannel(channel);
             }
         }
 
-        // Build the 'Sticky' Notification
+        // Build the notification with Maximum Priority for Oppo/Realme visibility
         NotificationCompat.Builder builder = new NotificationCompat.Builder(context, STEALTH_CHANNEL_ID)
-                .setSmallIcon(R.drawable.hfs)
-                .setContentTitle("HFS Security")
-                .setContentText("Identity Verified - Tap to open vault")
+                .setSmallIcon(R.drawable.hfs) // Your hfs.png icon
+                .setContentTitle("HFS: Identity Verified")
+                .setContentText("Tap here to HIDE or UNHIDE the app icon")
                 .setPriority(NotificationCompat.PRIORITY_MAX)
                 .setCategory(NotificationCompat.CATEGORY_SERVICE)
                 .setContentIntent(pendingIntent)
-                .setAutoCancel(true) // Vanishes once clicked
-                .setOngoing(false);  // Not permanently stuck, but high priority
+                .setAutoCancel(true)
+                .setOngoing(false); 
 
         if (notificationManager != null) {
             notificationManager.notify(STEALTH_NOTIF_ID, builder.build());
