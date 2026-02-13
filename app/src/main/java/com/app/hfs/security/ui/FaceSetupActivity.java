@@ -1,6 +1,7 @@
 package com.hfs.security.ui;
 
 import android.graphics.PointF;
+import android.graphics.Rect;
 import android.os.Bundle;
 import android.util.Log;
 import android.view.View;
@@ -34,9 +35,10 @@ import java.util.concurrent.Executors;
 
 /**
  * Owner Face Registration Screen.
- * FIXED: Implemented Multi-Frame Averaging.
- * Instead of a single frame, this captures 5 biometric snapshots to create 
- * a highly accurate 'Owner Face Map', resolving the false mismatch issues.
+ * UPDATED for "Zero-Fail" Plan:
+ * 1. Step 2: Normalizes landmarks based on Face Bounding Box width (Fixes Distance).
+ * 2. Step 3: Implements 5-Point Triangulation (Eyes, Nose, Mouth corners).
+ * 3. Multi-Frame Averaging: Captures 5 samples for a rock-solid identity map.
  */
 public class FaceSetupActivity extends AppCompatActivity {
 
@@ -46,11 +48,14 @@ public class FaceSetupActivity extends AppCompatActivity {
     private FaceDetector detector;
     private HFSDatabaseHelper db;
 
-    // Calibration Variables
+    // Calibration state
     private boolean isCalibrationDone = false;
-    private final List<Float> capturedRatiosA = new ArrayList<>();
-    private final List<Float> capturedRatiosB = new ArrayList<>();
-    private final int REQUIRED_CALIBRATION_FRAMES = 5;
+    private final int SAMPLES_REQUIRED = 5;
+    
+    // Lists to store normalized ratios from 5 points
+    private final List<Float> ratioEyeToEye = new ArrayList<>();
+    private final List<Float> ratioEyeToNose = new ArrayList<>();
+    private final List<Float> ratioMouthWidth = new ArrayList<>();
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -62,10 +67,11 @@ public class FaceSetupActivity extends AppCompatActivity {
         db = HFSDatabaseHelper.getInstance(this);
         cameraExecutor = Executors.newSingleThreadExecutor();
 
+        // Configure ML Kit for high-accuracy landmark detection
         FaceDetectorOptions options = new FaceDetectorOptions.Builder()
                 .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_ACCURATE)
                 .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_ALL)
-                .setMinFaceSize(0.4f) // Require user to be close for calibration
+                .setMinFaceSize(0.35f) // User must be reasonably close
                 .build();
         
         detector = FaceDetection.getClient(options);
@@ -103,7 +109,7 @@ public class FaceSetupActivity extends AppCompatActivity {
                 cameraProvider.bindToLifecycle(this, cameraSelector, preview, imageAnalysis);
 
             } catch (ExecutionException | InterruptedException e) {
-                Log.e(TAG, "Camera Setup Failed: " + e.getMessage());
+                Log.e(TAG, "CameraX bind failed", e);
             }
         }, ContextCompat.getMainExecutor(this));
     }
@@ -122,14 +128,15 @@ public class FaceSetupActivity extends AppCompatActivity {
                     if (!faces.isEmpty() && !isCalibrationDone) {
                         Face face = faces.get(0);
                         
-                        // Extract all 4 points for triangulation
+                        // Extract all 5 points required for triangulation
                         FaceLandmark leftEye = face.getLandmark(FaceLandmark.LEFT_EYE);
                         FaceLandmark rightEye = face.getLandmark(FaceLandmark.RIGHT_EYE);
                         FaceLandmark nose = face.getLandmark(FaceLandmark.NOSE_BASE);
-                        FaceLandmark mouth = face.getLandmark(FaceLandmark.MOUTH_BOTTOM);
+                        FaceLandmark mouthL = face.getLandmark(FaceLandmark.MOUTH_LEFT);
+                        FaceLandmark mouthR = face.getLandmark(FaceLandmark.MOUTH_RIGHT);
 
-                        if (leftEye != null && rightEye != null && nose != null && mouth != null) {
-                            collectBiometricSample(leftEye, rightEye, nose, mouth);
+                        if (leftEye != null && rightEye != null && nose != null && mouthL != null && mouthR != null) {
+                            collectNormalizedSample(face, leftEye, rightEye, nose, mouthL, mouthR);
                         }
                     }
                 })
@@ -137,56 +144,68 @@ public class FaceSetupActivity extends AppCompatActivity {
     }
 
     /**
-     * Collects samples until we reach the required frame count for averaging.
+     * Logic for Step 2 & 3: Normalizes distances by face width and stores samples.
      */
-    private void collectBiometricSample(FaceLandmark L, FaceLandmark R, FaceLandmark N, FaceLandmark M) {
-        float eyeDist = calculateDistance(L.getPosition(), R.getPosition());
-        float noseDist = calculateDistance(L.getPosition(), N.getPosition());
-        float mouthDist = calculateDistance(L.getPosition(), M.getPosition());
+    private void collectNormalizedSample(Face face, FaceLandmark L, FaceLandmark R, 
+                                         FaceLandmark N, FaceLandmark ML, FaceLandmark MR) {
+        
+        // Step 2: Normalization Factor (The width of the face on screen)
+        Rect bounds = face.getBoundingBox();
+        float faceWidth = (float) bounds.width();
+        if (faceWidth <= 0) return;
 
-        if (noseDist == 0 || mouthDist == 0) return;
+        // Step 3: Triangulation - Calculate distances
+        float distEyeToEye = calculateDistance(L.getPosition(), R.getPosition());
+        float distEyeToNose = calculateDistance(L.getPosition(), N.getPosition());
+        float distMouthWidth = calculateDistance(ML.getPosition(), MR.getPosition());
 
-        // Add ratios to the collection
-        capturedRatiosA.add(eyeDist / noseDist);
-        capturedRatiosB.add(eyeDist / mouthDist);
+        // Save distances as a percentage of the total face width
+        // This ensures math stays the same regardless of phone distance
+        ratioEyeToEye.add(distEyeToEye / faceWidth);
+        ratioEyeToNose.add(distEyeToNose / faceWidth);
+        ratioMouthWidth.add(distMouthWidth / faceWidth);
 
-        final int currentProgress = capturedRatiosA.size();
+        final int progress = ratioEyeToEye.size();
 
         runOnUiThread(() -> {
-            binding.tvStatus.setText("CALIBRATING: " + currentProgress + "/" + REQUIRED_CALIBRATION_FRAMES);
-            
-            if (currentProgress >= REQUIRED_CALIBRATION_FRAMES) {
-                finalizeCalibration();
+            binding.tvStatus.setText("CALIBRATING IDENTITY: " + progress + "/" + SAMPLES_REQUIRED);
+            if (progress >= SAMPLES_REQUIRED) {
+                saveAveragedIdentity();
             }
         });
     }
 
     /**
-     * Calculates the final average proportions and saves to DB.
+     * Finalizes the Zero-Fail Identity Map by averaging the 5 snapshots.
      */
-    private void finalizeCalibration() {
+    private void saveAveragedIdentity() {
         isCalibrationDone = true;
 
-        float sumA = 0, sumB = 0;
-        for (float r : capturedRatiosA) sumA += r;
-        for (float r : capturedRatiosB) sumB += r;
+        float avgEE = 0, avgEN = 0, avgMW = 0;
+        for (int i = 0; i < SAMPLES_REQUIRED; i++) {
+            avgEE += ratioEyeToEye.get(i);
+            avgEN += ratioEyeToNose.get(i);
+            avgMW += ratioMouthWidth.get(i);
+        }
 
-        float avgA = sumA / REQUIRED_CALIBRATION_FRAMES;
-        float avgB = sumB / REQUIRED_CALIBRATION_FRAMES;
+        avgEE /= SAMPLES_REQUIRED;
+        avgEN /= SAMPLES_REQUIRED;
+        avgMW /= SAMPLES_REQUIRED;
 
-        // Final Format: RatioA|RatioB
-        final String finalIdentityMap = avgA + "|" + avgB;
+        // Construct the complex signature string
+        final String signatureMap = avgEE + "|" + avgEN + "|" + avgMW;
 
         runOnUiThread(() -> {
             binding.captureAnimation.setVisibility(View.VISIBLE);
-            binding.tvStatus.setText("IDENTITY VERIFIED & SAVED");
+            binding.tvStatus.setText("BIOMETRIC SIGNATURE SAVED");
             
-            // Save the averaged biometric map
-            db.saveOwnerFaceData(finalIdentityMap);
+            // Save the normalized 5-point map to the database
+            db.saveOwnerFaceData(signatureMap);
             db.setSetupComplete(true);
 
-            Toast.makeText(this, "Face Calibration Complete", Toast.LENGTH_LONG).show();
+            Toast.makeText(this, "Calibration Successful", Toast.LENGTH_LONG).show();
 
+            // Return to settings after 2 seconds
             binding.rootLayout.postDelayed(this::finish, 2000);
         });
     }
