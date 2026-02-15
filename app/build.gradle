@@ -11,16 +11,13 @@ android {
         minSdkVersion 26
         targetSdkVersion 34
         versionCode 1
-        versionName "1.0" 
+        versionName "1.0"
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }
 
-    // Signing configuration for GitHub Actions
     signingConfigs {
         release {
-            // These variables are pulled from the environment variables 
-            // defined in your GitHub Workflow file.
             storeFile file("release.jks")
             storePassword System.getenv("KEYSTORE_PASSWORD")
             keyAlias System.getenv("KEY_ALIAS")
@@ -32,12 +29,7 @@ android {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
-            
-            // Link the release build to the signing configuration above
             signingConfig signingConfigs.release
-        }
-        debug {
-            // Debug builds use the default auto-generated key.
         }
     }
 
@@ -50,7 +42,6 @@ android {
         viewBinding true
     }
 
-    // Required to prevent build conflicts with Google API client libraries
     packagingOptions {
         resources {
             excludes += ['META-INF/DEPENDENCIES', 'META-INF/LICENSE', 'META-INF/LICENSE.txt', 'META-INF/notice.txt', 'META-INF/ASL2.0']
@@ -64,14 +55,12 @@ dependencies {
     implementation 'com.google.android.material:material:1.11.0'
     implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
 
-    // Biometric Authentication (Handles System Face, Finger, PIN, and Pattern)
+    // Biometric & Navigation
     implementation 'androidx.biometric:biometric:1.1.0'
-
-    // Navigation Components
     implementation 'androidx.navigation:navigation-fragment:2.7.7'
     implementation 'androidx.navigation:navigation-ui:2.7.7'
 
-    // Android CameraX (For invisible intruder photo capture)
+    // Android CameraX
     implementation 'androidx.camera:camera-camera2:1.3.1'
     implementation 'androidx.camera:camera-lifecycle:1.3.1'
     implementation 'androidx.camera:camera-view:1.3.1'
@@ -79,23 +68,21 @@ dependencies {
     // Google Play Services - Location
     implementation 'com.google.android.gms:play-services-location:21.1.0'
 
-    // --- NEW: GOOGLE DRIVE & CLOUD SYNC DEPENDENCIES ---
-    // Google Sign-In
+    // --- GOOGLE DRIVE & CLOUD SYNC DEPENDENCIES ---
     implementation 'com.google.android.gms:play-services-auth:20.7.0'
-    // Google Drive REST API
     implementation 'com.google.api-client:google-api-client-android:1.34.0'
     implementation 'com.google.apis:google-api-services-drive:v3-rev20230822-2.0.0'
-    // WorkManager (For Offline/Background Auto-Upload logic)
+    
+    // FIX: Added the specific HTTP client for Android to resolve 'AndroidHttp' error
+    implementation 'com.google.http-client:google-http-client-android:1.43.3'
+    
+    // WorkManager
     implementation "androidx.work:work-runtime:2.9.0"
 
-    // Glide (For loading captured intruder photos in history)
+    // Utilities
     implementation 'com.github.bumptech.glide:glide:4.16.0'
     annotationProcessor 'com.github.bumptech.glide:compiler:4.16.0'
-
-    // Gson (For data storage)
     implementation 'com.google.code.gson:gson:2.10.1'
-
-    // Local Storage & File Management helpers
     implementation 'androidx.documentfile:documentfile:1.0.1'
 
     // Testing
