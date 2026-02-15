@@ -7,7 +7,6 @@ import android.graphics.ImageFormat;
 import android.graphics.Matrix;
 import android.graphics.Rect;
 import android.graphics.YuvImage;
-import android.media.Image;
 import android.util.Log;
 
 import androidx.camera.core.ImageProxy;
@@ -22,10 +21,9 @@ import java.util.Date;
 import java.util.Locale;
 
 /**
- * Data Storage Utility (Phase 6).
- * Manages the secret saving of intruder photos.
- * Data is stored in: /Android/data/com.hfs.security/files/intruders/
- * This location is hidden from standard Gallery apps.
+ * Data Storage Utility.
+ * FIXED: Added saveIntruderCaptureAndGetFile to support Google Drive uploads.
+ * This class handles the conversion of live camera frames into secure local JPEG files.
  */
 public class FileSecureHelper {
 
@@ -33,26 +31,19 @@ public class FileSecureHelper {
     private static final String INTRUDER_DIR = "intruders";
 
     /**
-     * Captures the current frame from the ImageProxy, converts it to a JPG,
-     * and saves it secretly to the internal storage.
-     * 
-     * @param context App context.
-     * @param imageProxy The frame from the front camera.
+     * NEW: Saves the capture and returns the File object for Google Drive upload.
+     * Required by LockScreenActivity to process cloud sync.
      */
-    public static void saveIntruderCapture(Context context, ImageProxy imageProxy) {
-        // 1. Convert ImageProxy to Bitmap
+    public static File saveIntruderCaptureAndGetFile(Context context, ImageProxy imageProxy) {
         Bitmap bitmap = imageProxyToBitmap(imageProxy);
-        if (bitmap == null) return;
+        if (bitmap == null) return null;
 
-        // 2. Rotate bitmap if necessary (Front camera usually needs 270 deg rotation)
         int rotation = imageProxy.getImageInfo().getRotationDegrees();
         bitmap = rotateBitmap(bitmap, rotation);
 
-        // 3. Prepare the Filename: AppName-PackageName-Timestamp.jpg
         String timestamp = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(new Date());
-        String fileName = "Intrusion-" + timestamp + ".jpg";
+        String fileName = "HFS_INTRUDER_" + timestamp + ".jpg";
 
-        // 4. Get the secure internal directory
         File directory = new File(context.getExternalFilesDir(null), INTRUDER_DIR);
         if (!directory.exists()) {
             directory.mkdirs();
@@ -60,58 +51,70 @@ public class FileSecureHelper {
 
         File file = new File(directory, fileName);
 
-        // 5. Write the Bitmap to the file as a compressed JPEG
         try (FileOutputStream out = new FileOutputStream(file)) {
             bitmap.compress(Bitmap.CompressFormat.JPEG, 90, out);
-            Log.i(TAG, "Intruder evidence saved: " + file.getAbsolutePath());
+            Log.i(TAG, "Local evidence stored for upload: " + file.getAbsolutePath());
+            return file;
         } catch (IOException e) {
-            Log.e(TAG, "Failed to save intruder photo: " + e.getMessage());
+            Log.e(TAG, "File creation failed: " + e.getMessage());
+            return null;
         } finally {
             bitmap.recycle();
         }
     }
 
     /**
-     * Helper to convert CameraX YUV_420_888 format to Bitmap.
+     * Standard method to save capture without returning a file reference.
      */
-    private static Bitmap imageProxyToBitmap(ImageProxy image) {
-        ImageProxy.PlaneProxy[] planes = image.getPlanes();
-        ByteBuffer yBuffer = planes[0].getBuffer();
-        ByteBuffer uBuffer = planes[1].getBuffer();
-        ByteBuffer vBuffer = planes[2].getBuffer();
-
-        int ySize = yBuffer.remaining();
-        int uSize = uBuffer.remaining();
-        int vSize = vBuffer.remaining();
-
-        byte[] nv21 = new byte[ySize + uSize + vSize];
-        yBuffer.get(nv21, 0, ySize);
-        vBuffer.get(nv21, ySize, vSize);
-        uBuffer.get(nv21, ySize + vSize, uSize);
-
-        YuvImage yuvImage = new YuvImage(nv21, ImageFormat.NV21, image.getWidth(), image.getHeight(), null);
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        yuvImage.compressToJpeg(new Rect(0, 0, yuvImage.getWidth(), yuvImage.getHeight()), 100, out);
-
-        byte[] imageBytes = out.toByteArray();
-        return BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.length);
+    public static void saveIntruderCapture(Context context, ImageProxy imageProxy) {
+        saveIntruderCaptureAndGetFile(context, imageProxy);
     }
 
     /**
-     * Rotates a bitmap to the correct orientation.
+     * Helper to convert CameraX YUV_420_888 format to Bitmap.
+     */
+    private static Bitmap imageProxyToBitmap(ImageProxy image) {
+        try {
+            ImageProxy.PlaneProxy[] planes = image.getPlanes();
+            ByteBuffer yBuffer = planes[0].getBuffer();
+            ByteBuffer uBuffer = planes[1].getBuffer();
+            ByteBuffer vBuffer = planes[2].getBuffer();
+
+            int ySize = yBuffer.remaining();
+            int uSize = uBuffer.remaining();
+            int vSize = vBuffer.remaining();
+
+            byte[] nv21 = new byte[ySize + uSize + vSize];
+            yBuffer.get(nv21, 0, ySize);
+            vBuffer.get(nv21, ySize, vSize);
+            uBuffer.get(nv21, ySize + vSize, uSize);
+
+            YuvImage yuvImage = new YuvImage(nv21, ImageFormat.NV21, image.getWidth(), image.getHeight(), null);
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            yuvImage.compressToJpeg(new Rect(0, 0, yuvImage.getWidth(), yuvImage.getHeight()), 100, out);
+
+            byte[] imageBytes = out.toByteArray();
+            return BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.length);
+        } catch (Exception e) {
+            Log.e(TAG, "Bitmap conversion failed: " + e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Rotates a bitmap to the correct orientation based on camera sensor data.
      */
     private static Bitmap rotateBitmap(Bitmap bitmap, int degrees) {
         if (degrees == 0) return bitmap;
         Matrix matrix = new Matrix();
         matrix.postRotate(degrees);
-        // Flip horizontally because it's a front camera (mirror effect)
+        // Flip horizontally for front camera mirror effect
         matrix.postScale(-1, 1, bitmap.getWidth() / 2f, bitmap.getHeight() / 2f);
-        
         return Bitmap.createBitmap(bitmap, 0, 0, bitmap.getWidth(), bitmap.getHeight(), matrix, true);
     }
 
     /**
-     * Deletes all intruder evidence logs.
+     * Purges all locally stored intruder images.
      */
     public static void deleteAllLogs(Context context) {
         File directory = new File(context.getExternalFilesDir(null), INTRUDER_DIR);
