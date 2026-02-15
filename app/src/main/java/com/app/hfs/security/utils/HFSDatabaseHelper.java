@@ -12,15 +12,15 @@ import java.util.Set;
 
 /**
  * Manages local persistent storage for HFS Security.
- * FIXED: 
- * 1. Updated isSetupComplete() logic to verify PIN existence.
- * 2. Provides thread-safe access to all security configurations.
+ * UPDATED for Google Drive Integration:
+ * 1. Added keys for Cloud Sync status and Google Account management.
+ * 2. Maintained all existing MPIN and Protection Package logic.
  */
 public class HFSDatabaseHelper {
 
     private static final String PREF_NAME = "hfs_security_prefs";
     
-    // Database Keys
+    // Core Security Keys
     private static final String KEY_PROTECTED_PACKAGES = "protected_packages";
     private static final String KEY_MASTER_PIN = "master_pin";
     private static final String KEY_TRUSTED_NUMBER = "trusted_number";
@@ -28,6 +28,11 @@ public class HFSDatabaseHelper {
     private static final String KEY_STEALTH_MODE = "stealth_mode_enabled";
     private static final String KEY_FAKE_GALLERY = "fake_gallery_enabled";
     private static final String KEY_OWNER_FACE_DATA = "owner_face_template";
+
+    // NEW: Google Drive Cloud Sync Keys
+    private static final String KEY_DRIVE_ENABLED = "drive_sync_enabled";
+    private static final String KEY_GOOGLE_ACCOUNT = "google_account_email";
+    private static final String KEY_DRIVE_FOLDER_ID = "google_drive_folder_id";
 
     private static HFSDatabaseHelper instance;
     private final SharedPreferences prefs;
@@ -43,6 +48,32 @@ public class HFSDatabaseHelper {
             instance = new HFSDatabaseHelper(context.getApplicationContext());
         }
         return instance;
+    }
+
+    // --- GOOGLE DRIVE / CLOUD SETTINGS ---
+
+    public void setDriveEnabled(boolean enabled) {
+        prefs.edit().putBoolean(KEY_DRIVE_ENABLED, enabled).apply();
+    }
+
+    public boolean isDriveEnabled() {
+        return prefs.getBoolean(KEY_DRIVE_ENABLED, false);
+    }
+
+    public void saveGoogleAccount(String email) {
+        prefs.edit().putString(KEY_GOOGLE_ACCOUNT, email).apply();
+    }
+
+    public String getGoogleAccount() {
+        return prefs.getString(KEY_GOOGLE_ACCOUNT, null);
+    }
+
+    public void saveDriveFolderId(String folderId) {
+        prefs.edit().putString(KEY_DRIVE_FOLDER_ID, folderId).apply();
+    }
+
+    public String getDriveFolderId() {
+        return prefs.getString(KEY_DRIVE_FOLDER_ID, null);
     }
 
     // --- PROTECTED APPS STORAGE ---
@@ -72,7 +103,6 @@ public class HFSDatabaseHelper {
     }
 
     public String getMasterPin() {
-        // Returns "0000" if no PIN has ever been set
         return prefs.getString(KEY_MASTER_PIN, "0000");
     }
 
@@ -86,15 +116,9 @@ public class HFSDatabaseHelper {
 
     // --- APP SETUP STATUS ---
 
-    /**
-     * FIXED: This method now verifies the physical existence of an MPIN
-     * in addition to the setup flag. This solves the persistent 'Welcome' toast issue.
-     */
     public boolean isSetupComplete() {
         boolean flag = prefs.getBoolean(KEY_SETUP_COMPLETE, false);
         String pin = getMasterPin();
-        
-        // Setup is only truly complete if flag is true AND pin is not the default
         return flag && !pin.equals("0000") && !pin.isEmpty();
     }
 
@@ -120,7 +144,7 @@ public class HFSDatabaseHelper {
         return prefs.getBoolean(KEY_FAKE_GALLERY, false);
     }
 
-    // --- LEGACY/UNUSED DATA ---
+    // --- LEGACY DATA ---
 
     public void saveOwnerFaceData(String faceData) {
         prefs.edit().putString(KEY_OWNER_FACE_DATA, faceData).apply();
@@ -130,9 +154,6 @@ public class HFSDatabaseHelper {
         return prefs.getString(KEY_OWNER_FACE_DATA, "");
     }
 
-    /**
-     * Resets the app to factory settings.
-     */
     public void clearDatabase() {
         prefs.edit().clear().apply();
     }
