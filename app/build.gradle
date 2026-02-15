@@ -4,7 +4,7 @@ plugins {
 
 android {
     namespace 'com.hfs.security'
-    compileSdkVersion 34
+    compileSdkVersion 34 
 
     defaultConfig {
         applicationId "com.hfs.security"
