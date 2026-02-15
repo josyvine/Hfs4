@@ -91,6 +91,59 @@
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
+        <!-- NEW SECTION: CLOUD STORAGE (Fixes 8 SettingsFragment Errors) -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="12dp"
+            android:text="Cloud Storage Sync"
+            android:textColor="@color/hfs_primary_blue"
+            android:textSize="14sp"
+            android:textStyle="bold" />
+
+        <com.google.android.material.card.MaterialCardView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="24dp"
+            app:cardBackgroundColor="@color/hfs_surface_dark"
+            app:cardCornerRadius="12dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="16dp">
+
+                <com.google.android.material.switchmaterial.SwitchMaterial
+                    android:id="@+id/switchCloudSync"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Automatic Drive Upload"
+                    android:textColor="@android:color/white"
+                    android:textSize="16sp"
+                    app:thumbTint="@color/hfs_primary_blue" />
+
+                <TextView
+                    android:id="@+id/tvDriveAccountStatus"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="Status: Disconnected"
+                    android:textColor="@android:color/darker_gray"
+                    android:textSize="12sp" />
+
+                <Button
+                    android:id="@+id/btnConnectDrive"
+                    style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="50dp"
+                    android:layout_marginTop="16dp"
+                    android:text="Connect Google Drive"
+                    android:textColor="@color/hfs_primary_blue"
+                    app:strokeColor="@color/hfs_primary_blue" />
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
         <!-- SECTION 2: PROTECTION MODES -->
         <TextView
             android:layout_width="wrap_content"
@@ -211,7 +264,7 @@
                     <TextView
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="Last updated: 09-Feb-2026"
+                        android:text="Status: Identity Calibrated"
                         android:textColor="@android:color/darker_gray"
                         android:textSize="12sp" />
                 </LinearLayout>
