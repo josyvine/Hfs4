@@ -1,126 +1,332 @@
-package com.hfs.security.services;
+package com.hfs.security.ui;
 
-import android.accessibilityservice.AccessibilityService;
+import android.app.KeyguardManager;
+import android.content.Context;
 import android.content.Intent;
-import android.content.pm.ApplicationInfo;
-import android.content.pm.PackageManager;
+import android.net.ConnectivityManager;
+import android.net.NetworkInfo;
+import android.os.Build;
+import android.os.Bundle;
 import android.util.Log;
-import android.view.accessibility.AccessibilityEvent;
+import android.view.View;
+import android.view.WindowManager;
+import android.widget.Toast;
 
-import com.hfs.security.ui.LockScreenActivity;
+import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
+import androidx.appcompat.app.AppCompatActivity;
+import androidx.biometric.BiometricManager;
+import androidx.biometric.BiometricPrompt;
+import androidx.camera.core.CameraSelector;
+import androidx.camera.core.ImageAnalysis;
+import androidx.camera.core.Preview;
+import androidx.camera.lifecycle.ProcessCameraProvider;
+import androidx.core.content.ContextCompat;
+import androidx.work.Data;
+import androidx.work.OneTimeWorkRequest;
+import androidx.work.WorkManager;
+
+import com.google.android.gms.auth.api.signin.GoogleSignIn;
+import com.google.android.gms.auth.api.signin.GoogleSignInAccount;
+import com.google.api.client.extensions.android.http.AndroidHttp;
+import com.google.api.client.googleapis.extensions.android.gms.auth.GoogleAccountCredential;
+import com.google.api.client.json.gson.GsonFactory;
+import com.google.api.services.drive.Drive;
+import com.google.api.services.drive.DriveScopes;
+import com.google.common.util.concurrent.ListenableFuture;
+
+import com.hfs.security.databinding.ActivityLockScreenBinding;
+import com.hfs.security.services.DriveUploadWorker;
+import com.hfs.security.services.HFSAccessibilityService;
+import com.hfs.security.utils.DriveHelper;
+import com.hfs.security.utils.FileSecureHelper;
 import com.hfs.security.utils.HFSDatabaseHelper;
+import com.hfs.security.utils.LocationHelper;
+import com.hfs.security.utils.SmsHelper;
 
-import java.util.Set;
+import java.io.File;
+import java.util.Collections;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /**
- * HFS Real-time Detection Service.
- * Replaces polling with event-driven detection for Zero-Flash locking.
+ * The Security Overlay Activity.
+ * FIXED: Context stability for Google Drive Uploads to prevent "Pending Upload" errors.
  */
-public class HFSAccessibilityService extends AccessibilityService {
+public class LockScreenActivity extends AppCompatActivity {
 
-    private static final String TAG = "HFS_Accessibility";
+    private static final String TAG = "HFS_LockScreen";
+    private static final int SYSTEM_CREDENTIAL_REQUEST_CODE = 505;
+
+    private ActivityLockScreenBinding binding;
+    private ExecutorService cameraExecutor;
     private HFSDatabaseHelper db;
+    private String targetPackage;
+    
+    private boolean isActionTaken = false;
+    private boolean isCameraCaptured = false;
+    private File intruderFile = null;
 
-    // --- SESSION CONTROL FLAGS (Moved from AppMonitorService) ---
-    public static boolean isLockActive = false;
-    private static String unlockedPackage = "";
-    private static long lastUnlockTimestamp = 0;
-    private static final long SESSION_GRACE_MS = 10000; // 10 Seconds
-
-    /**
-     * Signals that the owner has successfully bypassed the lock.
-     * Called by LockScreenActivity.
-     */
-    public static void unlockSession(String packageName) {
-        unlockedPackage = packageName;
-        lastUnlockTimestamp = System.currentTimeMillis();
-        Log.d(TAG, "Owner Verified. Grace Period active for: " + packageName);
-    }
+    private Executor biometricExecutor;
+    private BiometricPrompt biometricPrompt;
+    private BiometricPrompt.PromptInfo promptInfo;
 
     @Override
-    public void onServiceConnected() {
-        super.onServiceConnected();
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+
+        // Notify Service that lock screen is visible
+        HFSAccessibilityService.isLockActive = true;
+
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED
+                | WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD
+                | WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+                | WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON);
+
+        binding = ActivityLockScreenBinding.inflate(getLayoutInflater());
+        setContentView(binding.getRoot());
+
         db = HFSDatabaseHelper.getInstance(this);
-        Log.d(TAG, "HFS Accessibility Service Connected");
+        cameraExecutor = Executors.newSingleThreadExecutor();
+        targetPackage = getIntent().getStringExtra("TARGET_APP_PACKAGE");
+
+        binding.lockContainer.setVisibility(View.VISIBLE);
+
+        // 1. Initialize background camera capture
+        startInvisibleCamera();
+
+        // 2. Configure System Biometrics
+        setupSystemSecurity();
+
+        // 3. Start authentication immediately
+        triggerSystemAuth();
+
+        binding.btnUnlockPin.setOnClickListener(v -> checkMpinAndUnlock());
+        
+        binding.btnFingerprint.setOnClickListener(v -> triggerSystemAuth());
     }
 
-    @Override
-    public void onAccessibilityEvent(AccessibilityEvent event) {
-        // We only care about window state changes (App opening/closing)
-        if (event.getEventType() == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
-            
-            if (event.getPackageName() == null) return;
-            String currentPkg = event.getPackageName().toString();
-
-            // 1. SELF-PROTECTION: Ignore HFS itself to prevent lock loops
-            if (currentPkg.equals(getPackageName())) {
-                return;
+    private void setupSystemSecurity() {
+        biometricExecutor = ContextCompat.getMainExecutor(this);
+        biometricPrompt = new BiometricPrompt(this, biometricExecutor, 
+                new BiometricPrompt.AuthenticationCallback() {
+            @Override
+            public void onAuthenticationSucceeded(@NonNull BiometricPrompt.AuthenticationResult result) {
+                super.onAuthenticationSucceeded(result);
+                onOwnerVerified();
             }
 
-            // 2. Skip logic if Lock Screen is already visible
-            if (isLockActive) {
-                return;
-            }
-
-            // 3. RE-ARM LOGIC: If user switches apps, reset session
-            if (!currentPkg.equals(unlockedPackage)) {
-                if (!unlockedPackage.isEmpty()) {
-                    Log.d(TAG, "User left protected area. Security Re-armed.");
-                    unlockedPackage = "";
+            @Override
+            public void onAuthenticationError(int errorCode, @NonNull CharSequence errString) {
+                super.onAuthenticationError(errorCode, errString);
+                if (errorCode == BiometricPrompt.ERROR_NEGATIVE_BUTTON) {
+                    showSystemCredentialPicker();
+                } else if (errorCode != BiometricPrompt.ERROR_USER_CANCELED) {
+                    triggerIntruderAlert();
                 }
             }
+        });
 
-            // 4. CHECK IF APP IS PROTECTED
-            Set<String> protectedApps = db.getProtectedPackages();
-            if (protectedApps.contains(currentPkg)) {
-                
-                // Check if current session is valid
-                boolean isSessionValid = currentPkg.equals(unlockedPackage) && 
-                        (System.currentTimeMillis() - lastUnlockTimestamp < SESSION_GRACE_MS);
+        BiometricPrompt.PromptInfo.Builder builder = new BiometricPrompt.PromptInfo.Builder()
+                .setTitle("HFS Security")
+                .setSubtitle("Authenticate to access your app");
 
-                if (!isSessionValid) {
-                    Log.i(TAG, "Security Breach: Immediate Lock Trigger for " + currentPkg);
-                    triggerLockOverlay(currentPkg);
-                }
-            }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            builder.setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG 
+                                            | BiometricManager.Authenticators.DEVICE_CREDENTIAL);
+        } else {
+            builder.setNegativeButtonText("Use System PIN");
         }
+
+        promptInfo = builder.build();
     }
 
-    @Override
-    public void onInterrupt() {
-        Log.w(TAG, "HFS Accessibility Service Interrupted");
-    }
-
-    /**
-     * Launches the Lock Screen Overlay immediately.
-     */
-    private void triggerLockOverlay(String packageName) {
-        String appName = getAppNameFromPackage(packageName);
-        
-        Intent lockIntent = new Intent(this, LockScreenActivity.class);
-        lockIntent.putExtra("TARGET_APP_PACKAGE", packageName);
-        lockIntent.putExtra("TARGET_APP_NAME", appName);
-        
-        // Critical flags for launching from a Service context
-        lockIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK 
-                          | Intent.FLAG_ACTIVITY_SINGLE_TOP 
-                          | Intent.FLAG_ACTIVITY_CLEAR_TOP
-                          | Intent.FLAG_ACTIVITY_NO_USER_ACTION); // Prevents animation overlap
-        
+    private void triggerSystemAuth() {
         try {
-            startActivity(lockIntent);
+            biometricPrompt.authenticate(promptInfo);
         } catch (Exception e) {
-            Log.e(TAG, "Failed to start lock overlay: " + e.getMessage());
+            showSystemCredentialPicker();
         }
     }
 
-    private String getAppNameFromPackage(String packageName) {
-        PackageManager pm = getPackageManager();
-        try {
-            ApplicationInfo ai = pm.getApplicationInfo(packageName, 0);
-            return (String) pm.getApplicationLabel(ai);
-        } catch (PackageManager.NameNotFoundException e) {
-            return packageName; 
+    private void triggerIntruderAlert() {
+        if (isActionTaken) return;
+        isActionTaken = true;
+
+        LocationHelper.getDeviceLocation(this, new LocationHelper.LocationResultCallback() {
+            @Override
+            public void onLocationFound(String mapLink) {
+                processIntruderResponse(mapLink);
+            }
+
+            @Override
+            public void onLocationFailed(String error) {
+                processIntruderResponse("GPS Signal Lost");
+            }
+        });
+    }
+
+    private void processIntruderResponse(String mapLink) {
+        String appName = getIntent().getStringExtra("TARGET_APP_NAME");
+        if (appName == null) appName = "Protected Files";
+
+        boolean isDriveReady = db.isDriveEnabled() && db.getGoogleAccount() != null;
+
+        // Note: Using getApplicationContext() for network check is safer
+        if (isDriveReady && isNetworkAvailable()) {
+            uploadToCloudAndSms(appName, mapLink);
+        } else if (isDriveReady) {
+            queueBackgroundUpload();
+            SmsHelper.sendAlertSms(this, appName, mapLink, "Security Breach", null);
+        } else {
+            SmsHelper.sendAlertSms(this, appName, mapLink, "Security Breach", null);
+        }
+
+        runOnUiThread(() -> {
+            binding.lockContainer.setVisibility(View.VISIBLE);
+            Toast.makeText(this, "⚠ Security Breach Recorded", Toast.LENGTH_LONG).show();
+            biometricPrompt.authenticate(promptInfo);
+        });
+    }
+
+    private void uploadToCloudAndSms(String appName, String mapLink) {
+        cameraExecutor.execute(() -> {
+            try {
+                if (intruderFile == null || !intruderFile.exists()) return;
+
+                // FIX: Use ApplicationContext to ensure Google Sign-In client is stable in background thread
+                GoogleSignInAccount account = GoogleSignIn.getLastSignedInAccount(getApplicationContext());
+                if (account == null) throw new Exception("Google Account Disconnected");
+
+                GoogleAccountCredential credential = GoogleAccountCredential.usingOAuth2(
+                        getApplicationContext(), Collections.singleton(DriveScopes.DRIVE_FILE));
+                credential.setSelectedAccount(account.getAccount());
+
+                Drive driveService = new Drive.Builder(
+                        AndroidHttp.newCompatibleTransport(),
+                        new GsonFactory(),
+                        credential)
+                        .setApplicationName("HFS Security")
+                        .build();
+
+                // FIX: Pass ApplicationContext to DriveHelper
+                DriveHelper driveHelper = new DriveHelper(getApplicationContext(), driveService);
+                String driveLink = driveHelper.uploadFileAndGetLink(intruderFile);
+
+                SmsHelper.sendAlertSms(getApplicationContext(), appName, mapLink, "Security Breach", driveLink);
+
+            } catch (Exception e) {
+                String errorMsg = e.getMessage();
+                Log.e(TAG, "Cloud upload failed: " + errorMsg);
+                
+                // SHOW ERROR TO USER ON SCREEN so they know why it failed
+                runOnUiThread(() -> 
+                    Toast.makeText(getApplicationContext(), "Upload Failed: " + errorMsg, Toast.LENGTH_LONG).show()
+                );
+
+                queueBackgroundUpload();
+                SmsHelper.sendAlertSms(getApplicationContext(), appName, mapLink, "Security Breach", null);
+            }
+        });
+    }
+
+    private void queueBackgroundUpload() {
+        if (intruderFile == null) return;
+
+        Data inputData = new Data.Builder()
+                .putString("file_path", intruderFile.getAbsolutePath())
+                .build();
+
+        OneTimeWorkRequest uploadRequest = new OneTimeWorkRequest.Builder(DriveUploadWorker.class)
+                .setInputData(inputData)
+                .build();
+
+        WorkManager.getInstance(this).enqueue(uploadRequest);
+    }
+
+    private boolean isNetworkAvailable() {
+        ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+        NetworkInfo activeNetwork = cm.getActiveNetworkInfo();
+        return activeNetwork != null && activeNetwork.isConnectedOrConnecting();
+    }
+
+    private void startInvisibleCamera() {
+        ListenableFuture<ProcessCameraProvider> cameraProviderFuture = 
+                ProcessCameraProvider.getInstance(this);
+
+        cameraProviderFuture.addListener(() -> {
+            try {
+                ProcessCameraProvider cameraProvider = cameraProviderFuture.get();
+                Preview preview = new Preview.Builder().build();
+                preview.setSurfaceProvider(binding.invisiblePreview.getSurfaceProvider());
+
+                ImageAnalysis imageAnalysis = new ImageAnalysis.Builder()
+                        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                        .build();
+
+                imageAnalysis.setAnalyzer(cameraExecutor, image -> {
+                    if (!isCameraCaptured) {
+                        isCameraCaptured = true;
+                        intruderFile = FileSecureHelper.saveIntruderCaptureAndGetFile(this, image);
+                        image.close();
+                    } else {
+                        image.close();
+                    }
+                });
+
+                CameraSelector cameraSelector = CameraSelector.DEFAULT_FRONT_CAMERA;
+                cameraProvider.unbindAll();
+                cameraProvider.bindToLifecycle(this, cameraSelector, preview, imageAnalysis);
+
+            } catch (ExecutionException | InterruptedException e) {
+                Log.e(TAG, "CameraX Initialization Error");
+            }
+        }, ContextCompat.getMainExecutor(this));
+    }
+
+    private void onOwnerVerified() {
+        HFSAccessibilityService.isLockActive = false;
+        if (targetPackage != null) {
+            HFSAccessibilityService.unlockSession(targetPackage);
+        }
+        finish();
+    }
+
+    private void showSystemCredentialPicker() {
+        KeyguardManager km = (KeyguardManager) getSystemService(Context.KEYGUARD_SERVICE);
+        if (km != null && km.isDeviceSecure()) {
+            Intent intent = km.createConfirmDeviceCredentialIntent("HFS Security", "Authenticate to proceed");
+            if (intent != null) startActivityForResult(intent, SYSTEM_CREDENTIAL_REQUEST_CODE);
         }
     }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, @Nullable Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == SYSTEM_CREDENTIAL_REQUEST_CODE) {
+            if (resultCode == RESULT_OK) onOwnerVerified();
+            else triggerIntruderAlert();
+        }
+    }
+
+    private void checkMpinAndUnlock() {
+        if (binding.etPinInput.getText().toString().equals(db.getMasterPin())) onOwnerVerified();
+        else {
+            binding.tvErrorMsg.setText("Incorrect HFS MPIN");
+            binding.etPinInput.setText("");
+            triggerIntruderAlert();
+        }
+    }
+
+    @Override
+    protected void onDestroy() {
+        cameraExecutor.shutdown();
+        HFSAccessibilityService.isLockActive = false;
+        super.onDestroy();
+    }
+
+    @Override
+    public void onBackPressed() {}
 }
