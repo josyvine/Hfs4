@@ -28,6 +28,8 @@
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- ADDED: Required for the new detection service -->
+    <uses-permission android:name="android.permission.BIND_ACCESSIBILITY_SERVICE" />
 
     <!-- 7. SMS ALERT PERMISSIONS -->
     <uses-permission android:name="android.permission.SEND_SMS" />
@@ -84,12 +86,19 @@
             android:theme="@style/Theme.HFS.LockOverlay"
             android:windowSoftInputMode="stateAlwaysHidden" />
 
-        <!-- E. MONITORING SERVICE (Background Guard) -->
+        <!-- E. ACCESSIBILITY SERVICE (Replaces Background Guard) -->
         <service
-            android:name=".services.AppMonitorService"
-            android:enabled="true"
-            android:exported="false"
-            android:foregroundServiceType="location|camera|dataSync" />
+            android:name=".services.HFSAccessibilityService"
+            android:label="@string/app_name"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service_config" />
+        </service>
 
         <!-- F. DEVICE ADMIN RECEIVER -->
         <receiver
