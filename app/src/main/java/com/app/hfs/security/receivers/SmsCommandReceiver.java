@@ -8,7 +8,6 @@ import android.telephony.SmsMessage;
 import android.util.Log;
 import android.widget.Toast;
 
-import com.hfs.security.services.AppMonitorService;
 import com.hfs.security.utils.HFSDatabaseHelper;
 
 /**
@@ -79,23 +78,25 @@ public class SmsCommandReceiver extends BroadcastReceiver {
     }
 
     /**
-     * Activates the background monitor service remotely.
+     * REMOTE COMMAND: LOCK
+     * Note: Accessibility Services require manual user activation in Settings.
+     * This method logs the remote request.
      */
     private void executeRemoteLock(Context context) {
-        Log.i(TAG, "REMOTE COMMAND: LOCK INITIATED");
-        Intent serviceIntent = new Intent(context, AppMonitorService.class);
-        context.startForegroundService(serviceIntent);
-        Toast.makeText(context, "HFS: System Locked Remotely", Toast.LENGTH_SHORT).show();
+        Log.i(TAG, "REMOTE COMMAND RECEIVED: LOCK INITIATED");
+        // Manual activation of Accessibility Service is required via Settings.
+        Toast.makeText(context, "HFS: Remote Lock Command Received", Toast.LENGTH_SHORT).show();
     }
 
     /**
-     * Disables the background monitor service remotely.
+     * REMOTE COMMAND: UNLOCK
+     * Note: Accessibility Services require manual user deactivation in Settings.
+     * This method logs the remote request.
      */
     private void executeRemoteUnlock(Context context) {
-        Log.i(TAG, "REMOTE COMMAND: UNLOCK INITIATED");
-        Intent serviceIntent = new Intent(context, AppMonitorService.class);
-        context.stopService(serviceIntent);
-        Toast.makeText(context, "HFS: System Unlocked Remotely", Toast.LENGTH_SHORT).show();
+        Log.i(TAG, "REMOTE COMMAND RECEIVED: UNLOCK INITIATED");
+        // Manual deactivation of Accessibility Service is required via Settings.
+        Toast.makeText(context, "HFS: Remote Unlock Command Received", Toast.LENGTH_SHORT).show();
     }
 
     /**
