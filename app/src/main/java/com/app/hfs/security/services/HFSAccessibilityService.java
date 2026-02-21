@@ -8,6 +8,7 @@ import android.util.Log;
 import android.view.accessibility.AccessibilityEvent;
 
 import com.hfs.security.ui.LockScreenActivity;
+import com.hfs.security.ui.SystemCaptureActivity;
 import com.hfs.security.utils.HFSDatabaseHelper;
 
 import java.util.Set;
@@ -16,29 +17,24 @@ import java.util.Set;
  * HFS Real-time Detection Service.
  * Replaces polling with event-driven detection for Zero-Flash locking.
  * 
- * FIXED: Task Manager Bypass. 
- * The service now verifies the foreground package more strictly to prevent 
- * the "isLockActive" flag from causing a deadlock when the lock screen 
- * is hidden via the Recent Apps/Task button.
+ * NEW CAPABILITY: Watches the System Lock Screen (System UI) for biometric 
+ * failure text or 2 failed PIN clicks, and launches the Invisible Camera.
  */
 public class HFSAccessibilityService extends AccessibilityService {
 
     private static final String TAG = "HFS_Accessibility";
     private HFSDatabaseHelper db;
 
-    // --- SESSION CONTROL FLAGS ---
-    
-    // Flag to prevent re-triggering while the lock screen is already on top
+    // --- SESSION CONTROL FLAGS (For Protected Apps) ---
     public static boolean isLockActive = false;
-    
-    // Tracks which package the owner has successfully unlocked
     private static String unlockedPackage = "";
-    
-    // Timestamp for the 10-second grace period
     private static long lastUnlockTimestamp = 0;
-    
-    // Grace period duration: 10 Seconds
-    private static final long SESSION_GRACE_MS = 10000;
+    private static final long SESSION_GRACE_MS = 10000; // 10 Seconds
+
+    // --- SYSTEM LOCK TRACKERS (For Phone Unlock Failures) ---
+    private int systemPinAttemptCount = 0;
+    private long lastSystemAlertTime = 0;
+    private static final long SYSTEM_COOLDOWN_MS = 5000; // 5 seconds cooldown to prevent spamming
 
     /**
      * Signals that the owner has successfully bypassed the lock (Biometric/PIN).
@@ -57,43 +53,38 @@ public class HFSAccessibilityService extends AccessibilityService {
         Log.d(TAG, "HFS Accessibility Service Connected and Monitoring...");
     }
 
-    /**
-     * The Heart of the Detection System.
-     * This event fires the EXACT moment a new window appears on the screen.
-     */
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
-        // We only care about TYPE_WINDOW_STATE_CHANGED (App opening/switching)
-        if (event.getEventType() == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+        if (event.getPackageName() == null) return;
+        String currentPkg = event.getPackageName().toString();
+
+        int eventType = event.getEventType();
+
+        // ==========================================================
+        // PART 1: NORMAL HFS LOCK LOGIC (For Protected Apps)
+        // THIS IS UNTOUCHED AND WORKS EXACTLY AS BEFORE
+        // ==========================================================
+        if (eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
             
-            if (event.getPackageName() == null) return;
-            
-            String currentPkg = event.getPackageName().toString();
+            // If the phone successfully unlocks and leaves the System UI, reset the PIN failure counter
+            if (!currentPkg.equals("com.android.systemui")) {
+                systemPinAttemptCount = 0;
+            }
 
             // 1. SELF-PROTECTION: Ignore HFS itself to prevent lock loops.
             if (currentPkg.equals(getPackageName())) {
-                // If we are back in our own app, we can safely assume the lock UI is active
                 isLockActive = true;
                 return;
             }
 
-            /*
-             * 2. TASK MANAGER BYPASS FIX:
-             * If the current package is NOT our lock screen, and NOT the package 
-             * that was just unlocked, we must re-evaluate security even if 
-             * "isLockActive" is true. This prevents an orphaned lock screen 
-             * in the background from muting the service.
-             */
+            // 2. TASK MANAGER BYPASS FIX
             if (isLockActive && !currentPkg.equals(unlockedPackage)) {
-                // If the intruder is looking at a protected app, the lock must be forced.
-                // We proceed to the protection check.
+                // Proceed to protection check
             } else if (isLockActive) {
-                // Otherwise, if lock is active and it's a safe package, return.
                 return;
             }
 
-            // 3. RE-ARM LOGIC: If the user switches to a different app,
-            // immediately clear the previous unlock session for security.
+            // 3. RE-ARM LOGIC
             if (!currentPkg.equals(unlockedPackage)) {
                 if (!unlockedPackage.isEmpty()) {
                     Log.d(TAG, "User switched apps. Security Re-armed.");
@@ -101,18 +92,61 @@ public class HFSAccessibilityService extends AccessibilityService {
                 }
             }
 
-            // 4. PROTECTION LOGIC: Check if the current app is in the protected list.
+            // 4. PROTECTION LOGIC
             Set<String> protectedApps = db.getProtectedPackages();
-            
             if (protectedApps.contains(currentPkg)) {
-                
-                // Verify if the current session is within the 10-second grace window
                 boolean isSessionValid = currentPkg.equals(unlockedPackage) && 
                         (System.currentTimeMillis() - lastUnlockTimestamp < SESSION_GRACE_MS);
 
                 if (!isSessionValid) {
                     Log.i(TAG, "Security Breach Detected: Immediate Lock for " + currentPkg);
                     triggerLockOverlay(currentPkg);
+                }
+            }
+        }
+
+        // ==========================================================
+        // PART 2: THE NEW SYSTEM LOCK WATCHER (For Phone Screen)
+        // Watches the lock screen for Finger/Face/PIN failures
+        // ==========================================================
+        if (currentPkg.equals("com.android.systemui")) {
+            
+            long currentTime = System.currentTimeMillis();
+
+            // A. WATCH FOR FINGERPRINT/FACE TEXT ERRORS
+            if (eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) {
+                for (CharSequence text : event.getText()) {
+                    String screenText = text.toString().toLowerCase();
+                    
+                    // Look for standard Oppo/Realme/Android failure messages
+                    if (screenText.contains("not recognized") || 
+                        screenText.contains("mismatch") || 
+                        screenText.contains("incorrect") ||
+                        screenText.contains("try again")) {
+                        
+                        if (currentTime - lastSystemAlertTime > SYSTEM_COOLDOWN_MS) {
+                            Log.i(TAG, "System Biometric Failure Detected from text: " + screenText);
+                            triggerInvisibleSystemCamera();
+                            lastSystemAlertTime = currentTime;
+                            systemPinAttemptCount = 0; // Reset counter after alert
+                        }
+                    }
+                }
+            }
+
+            // B. WATCH FOR PIN/PATTERN CLICKS (Force 2-Attempt Rule)
+            if (eventType == AccessibilityEvent.TYPE_VIEW_CLICKED) {
+                systemPinAttemptCount++;
+                Log.d(TAG, "System UI Click Detected. Count: " + systemPinAttemptCount);
+
+                if (systemPinAttemptCount >= 2) {
+                    if (currentTime - lastSystemAlertTime > SYSTEM_COOLDOWN_MS) {
+                        Log.i(TAG, "System PIN Failure Detected (2 attempts).");
+                        triggerInvisibleSystemCamera();
+                        lastSystemAlertTime = currentTime;
+                    }
+                    // Reset to 0 so it counts 2 more attempts if they keep trying
+                    systemPinAttemptCount = 0; 
                 }
             }
         }
@@ -124,7 +158,7 @@ public class HFSAccessibilityService extends AccessibilityService {
     }
 
     /**
-     * Launches the Lock Screen Overlay Activity.
+     * NORMAL HFS LOCK: Launches the visible Lock Screen Overlay.
      */
     private void triggerLockOverlay(String packageName) {
         String appName = getAppNameFromPackage(packageName);
@@ -133,7 +167,6 @@ public class HFSAccessibilityService extends AccessibilityService {
         lockIntent.putExtra("TARGET_APP_PACKAGE", packageName);
         lockIntent.putExtra("TARGET_APP_NAME", appName);
         
-        // Essential flags for starting an Activity from a Service context
         lockIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK 
                           | Intent.FLAG_ACTIVITY_SINGLE_TOP 
                           | Intent.FLAG_ACTIVITY_CLEAR_TOP
@@ -141,7 +174,6 @@ public class HFSAccessibilityService extends AccessibilityService {
         
         try {
             startActivity(lockIntent);
-            // Explicitly set the flag here to ensure immediate state update
             isLockActive = true;
         } catch (Exception e) {
             Log.e(TAG, "Failed to launch lock overlay: " + e.getMessage());
@@ -149,9 +181,21 @@ public class HFSAccessibilityService extends AccessibilityService {
     }
 
     /**
-     * Helper to resolve the user-friendly App Name (e.g., "WhatsApp") 
-     * from the system package ID.
+     * SYSTEM LOCK INTRUDER: Launches the NEW Invisible Camera Activity.
+     * This takes the photo and sends the SMS without the intruder knowing.
      */
+    private void triggerInvisibleSystemCamera() {
+        Intent captureIntent = new Intent(this, SystemCaptureActivity.class);
+        captureIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK 
+                             | Intent.FLAG_ACTIVITY_MULTIPLE_TASK 
+                             | Intent.FLAG_ACTIVITY_NO_ANIMATION);
+        try {
+            startActivity(captureIntent);
+        } catch (Exception e) {
+            Log.e(TAG, "Failed to launch invisible system capture: " + e.getMessage());
+        }
+    }
+
     private String getAppNameFromPackage(String packageName) {
         PackageManager pm = getPackageManager();
         try {
