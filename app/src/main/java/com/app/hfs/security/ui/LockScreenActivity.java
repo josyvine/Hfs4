@@ -389,4 +389,4 @@ public class LockScreenActivity extends AppCompatActivity {
 
     @Override
     public void onBackPressed() {}
-}
+} 
